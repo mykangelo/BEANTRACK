@@ -42,6 +42,22 @@ CREATE TABLE `batches` (
   `processing_time` int(11) DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `accuracy_checks`
+--
+
+CREATE TABLE `accuracy_checks` (
+  `id` int(11) NOT NULL,
+  `batch_code` varchar(10) NOT NULL,
+  `bin_name` varchar(20) NOT NULL,
+  `beans_checked` decimal(10,2) NOT NULL DEFAULT 0.00,
+  `correctly_sorted` decimal(10,2) NOT NULL DEFAULT 0.00,
+  `created_at` datetime DEFAULT current_timestamp(),
+  UNIQUE KEY `batch_bin` (`batch_code`,`bin_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 --
 -- Dumping data for table `batches`
 --
@@ -85,6 +101,13 @@ INSERT INTO `inventory` (`id`, `bean_type`, `category`, `quantity_kg`, `updated_
 -- Indexes for table `batches`
 --
 ALTER TABLE `batches`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `batch_code` (`batch_code`);
+
+--
+-- Indexes for table `accuracy_checks`
+--
+ALTER TABLE `accuracy_checks`
   ADD PRIMARY KEY (`id`);
 
 --
@@ -103,6 +126,12 @@ ALTER TABLE `inventory`
 --
 ALTER TABLE `batches`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
+
+--
+-- AUTO_INCREMENT for table `accuracy_checks`
+--
+ALTER TABLE `accuracy_checks`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `inventory`

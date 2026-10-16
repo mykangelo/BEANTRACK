@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+.pio/
+.vscode/launch.json
+.vscode/tasks.json
+*.bin
+*.elf

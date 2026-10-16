@@ -232,7 +232,7 @@ function Button({ children, onClick, disabled, variant = "action", icon: Icon })
       setFlash(true);
       setTimeout(() => setFlash(false), 220);
     }
-    onClick && onClick(e);
+    if (onClick) onClick(e);
   }
 
   return (
@@ -333,6 +333,8 @@ function AlertBanner({ severity, icon: Icon, code, title, message, action }) {
 
 function NumberField({ value, onCommit, suffix, width = 80, disabled }) {
   const [draft, setDraft] = useState(String(value));
+  // Keep the editable draft aligned when the parent commits a new value.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setDraft(String(value)), [value]);
 
   function commit() {
@@ -375,7 +377,8 @@ function NumberField({ value, onCommit, suffix, width = 80, disabled }) {
 /* ---------------------------------------------------------------
    MAIN APP
 --------------------------------------------------------------- */
-const API_BASE = "http://localhost/beantrack-api";
+const API_BASE = import.meta.env.VITE_API_BASE || "/beantrack-api";
+const ESP32_WS_URL = import.meta.env.VITE_ESP32_WS_URL || "ws://beantrack.local:81";
 
 // The database table still has small_weight/fine_weight columns from before —
 // we fold both into "debris" here so old and new rows display consistently.
@@ -398,11 +401,13 @@ function mapDbBatch(row) {
 
 export default function CoffeeSorterApp() {
   const [view, setView] = useState("dashboard");
-  const [connected, setConnected] = useState(true);
+  const [connected, setConnected] = useState(false);
   const [dbDown, setDbDown] = useState(false);
   const [fault, setFault] = useState(null);
   const [accuracy, setAccuracy] = useState({}); // { B001: { large: {checked, correct}, ... } }
   const [batches, setBatches] = useState(SEED_BATCHES);
+  const [hardwareConnected, setHardwareConnected] = useState(false);
+  const wsRef = useRef(null);
 
   // Load real data from the MySQL database (also used by the "Retry" button)
   function loadFromDb() {
@@ -410,7 +415,11 @@ export default function CoffeeSorterApp() {
       .then((r) => r.json())
       .then((rows) => {
         if (!Array.isArray(rows)) throw new Error("bad response");
-        if (rows.length > 0) setBatches(rows.map(mapDbBatch));
+        if (rows.length > 0) {
+          const mapped = rows.map(mapDbBatch);
+          setBatches(mapped);
+          setMachine((m) => ({ ...m, batchId: nextBatchId(mapped) }));
+        }
         setDbDown(false);
       })
       .catch(() => setDbDown(true));
@@ -422,6 +431,7 @@ export default function CoffeeSorterApp() {
         if (rows.length > 0) {
           const next = { Arabica: { large: 0, medium: 0, debris: 0 }, Robusta: { large: 0, medium: 0, debris: 0 } };
           rows.forEach((r) => {
+            if (!next[r.bean_type]) return;
             if (r.category === "large") next[r.bean_type].large = Number(r.quantity_kg);
             else if (r.category === "medium") next[r.bean_type].medium = Number(r.quantity_kg);
             else next[r.bean_type].debris += Number(r.quantity_kg); // old "small" + "fine" rows fold into debris
@@ -433,7 +443,10 @@ export default function CoffeeSorterApp() {
 
     // accuracy checks: failures are silent (the accuracy_checks table is optional until it's created)
     fetch(`${API_BASE}/get_accuracy.php`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error("load failed");
+        return r.json();
+      })
       .then((rows) => {
         if (!Array.isArray(rows)) return;
         const next = {};
@@ -477,11 +490,68 @@ export default function CoffeeSorterApp() {
   const [live, setLive] = useState({ large: 0, medium: 0, debris: 0 });
 
   const tickRef = useRef(null);
+  const runActiveRef = useRef(false);
+  const runStartedAtRef = useRef(null);
   const PROCESS_TICKS = 60; // simulated run length
+
+  function sendHardwareCommand(command) {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(typeof command === "string" ? command : JSON.stringify(command));
+    return true;
+  }
+
+  function connectHardware() {
+    if (wsRef.current && [WebSocket.CONNECTING, WebSocket.OPEN].includes(wsRef.current.readyState)) return;
+    const socket = new WebSocket(ESP32_WS_URL);
+    wsRef.current = socket;
+
+    socket.onopen = () => {
+      setHardwareConnected(true);
+      setConnected(true);
+    };
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "telemetry") {
+          const top = Math.max(0, Number(message.top_grams) || 0);
+          const bottom = Math.max(0, Number(message.bottom_grams) || 0);
+          setLive({ large: top, medium: bottom, debris: 0 });
+          setMachine((m) => ({
+            ...m,
+            status: message.systemOn ? "Processing" : m.status === "Processing" ? "Idle" : m.status,
+            mode: message.mode === "Manual" ? "Manual" : "Automatic",
+            vibrationSpeed: Math.max(0, Math.min(100, Number(message.vibration_speed) || 0)),
+            sortingCategory: message.active_bin && message.active_bin !== "None" ? message.active_bin : "—",
+            liveWeight: top + bottom,
+            processingTime: message.systemOn && runStartedAtRef.current
+              ? Math.floor((Date.now() - runStartedAtRef.current) / 1000)
+              : m.processingTime,
+          }));
+        }
+      } catch {
+        // Ignore malformed device messages without breaking the connection.
+      }
+    };
+    socket.onerror = () => setHardwareConnected(false);
+    socket.onclose = () => {
+      if (wsRef.current === socket) wsRef.current = null;
+      setHardwareConnected(false);
+      setConnected(false);
+      setMachine((m) => m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m);
+    };
+  }
+
+  useEffect(() => {
+    connectHardware();
+    return () => {
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, []);
 
   // simulated ESP32 stream — three load cells, one under each bin
   useEffect(() => {
-    if (machine.status !== "Processing") return;
+    if (machine.status !== "Processing" || hardwareConnected) return;
     tickRef.current = setInterval(() => {
       setMachine((m) => {
         const nextTime = m.processingTime + 1;
@@ -505,11 +575,14 @@ export default function CoffeeSorterApp() {
       });
     }, 200);
     return () => clearInterval(tickRef.current);
-  }, [machine.status]);
+  }, [hardwareConnected, machine.inputTarget, machine.status]);
 
-  // finalize on completion
+  // Save a completed simulator run or a hardware run that has returned to Idle.
   useEffect(() => {
-    if (machine.status === "Completed") {
+    if (!runActiveRef.current || !["Completed", "Idle"].includes(machine.status)) return;
+    runActiveRef.current = false;
+    runStartedAtRef.current = null;
+
       let L = Math.round(live.large), M = Math.round(live.medium), D = Math.round(live.debris);
       const binSum = L + M + D;
       if (binSum > machine.inputTarget) {
@@ -553,9 +626,11 @@ export default function CoffeeSorterApp() {
         }),
       })
         .then((r) => r.json())
-        .then((res) => { if (!res.success) setDbDown(true); })
+        .then((res) => {
+          if (!res.success) setDbDown(true);
+          else loadFromDb();
+        })
         .catch(() => setDbDown(true));
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine.status]);
 
@@ -564,14 +639,9 @@ export default function CoffeeSorterApp() {
     Robusta: { large: 3.5, medium: 4.8, debris: 1.6 },
   });
 
-  // System down: losing the ESP32 link stops any running batch and flags an error
-  useEffect(() => {
-    if (!connected) {
-      setMachine((m) => ({ ...m, status: "Error", sortingCategory: "—" }));
-    }
-  }, [connected]);
-
   function resetRun() {
+    runActiveRef.current = false;
+    runStartedAtRef.current = null;
     setLive({ large: 0, medium: 0, debris: 0 });
     setMachine((m) => ({ ...m, status: "Idle", processingTime: 0, liveWeight: 0, sortingCategory: "—" }));
   }
@@ -584,21 +654,27 @@ export default function CoffeeSorterApp() {
     if (connected) resetRun();
   }
   function reconnect() {
-    setConnected(true);
-    if (!fault) resetRun();
+    connectHardware();
+    if (!fault && connected) resetRun();
   }
   const faultInfo = fault ? FAULTS[fault] : null;
 
   function handleStart() {
     if (machine.status === "Processing" || !connected || fault) return;
+    runActiveRef.current = true;
+    runStartedAtRef.current = Date.now();
+    sendHardwareCommand({ command: "START" });
     setLive({ large: 0, medium: 0, debris: 0 });
     setMachine((m) => ({ ...m, status: "Processing", processingTime: 0, liveWeight: 0 }));
   }
   function handleStop() {
+    sendHardwareCommand({ command: "STOP" });
     setMachine((m) => ({ ...m, status: m.status === "Processing" ? "Idle" : m.status }));
   }
   function handleReset() {
     clearInterval(tickRef.current);
+    runActiveRef.current = false;
+    runStartedAtRef.current = null;
     setFault(null);
     setLive({ large: 0, medium: 0, debris: 0 });
     setMachine((m) => ({
@@ -616,9 +692,11 @@ export default function CoffeeSorterApp() {
   }
   function setMode(mode) {
     if (machine.status === "Processing") return;
+    sendHardwareCommand({ command: "SET_MODE", mode });
     setMachine((m) => ({ ...m, mode }));
   }
   function setSpeed(v) {
+    sendHardwareCommand({ command: "SET_SPEED", value: v });
     setMachine((m) => ({ ...m, vibrationSpeed: v }));
   }
   function setInputTarget(v) {
@@ -721,7 +799,7 @@ export default function CoffeeSorterApp() {
             BeanTrack · sorting &amp; monitoring
           </div>
           <button
-            onClick={() => (connected ? setConnected(false) : reconnect())}
+            onClick={() => (connected ? wsRef.current?.close() : reconnect())}
             className="w-full flex items-center gap-2"
             style={{ color: connected ? C.amber : C.sidebarTextDim, ...mono, fontSize: 11 }}
           >
@@ -774,6 +852,7 @@ export default function CoffeeSorterApp() {
               connected={connected}
               fault={fault}
               onFault={triggerFault}
+              sendCommand={sendHardwareCommand}
             />
           )}
           {view === "monitor" && <SortingWeightMonitor machine={machine} live={live} />}
@@ -873,7 +952,7 @@ function Dashboard({ machine, live, inventory, dbDown }) {
 /* ---------------------------------------------------------------
    2. MACHINE CONTROL
 --------------------------------------------------------------- */
-function Control({ machine, onStart, onStop, onReset, setBeanType, setMode, setSpeed, setInputTarget, connected, fault, onFault }) {
+function Control({ machine, onStart, onStop, onReset, setBeanType, setMode, setSpeed, setInputTarget, connected, fault, onFault, sendCommand }) {
   const locked = machine.status === "Processing";
   const [speedActive, setSpeedActive] = useState(false);
   const [weightActive, setWeightActive] = useState(false);
@@ -1038,6 +1117,11 @@ function Control({ machine, onStart, onStop, onReset, setBeanType, setMode, setS
           <Button variant="action" icon={Power} onClick={onStart} disabled={locked || !connected || !!fault}>START SORTING</Button>
           <Button variant="action" icon={Square} onClick={onStop} disabled={!locked}>STOP SORTING</Button>
           <Button variant="reset" icon={RotateCcw} onClick={onReset}>RESET BATCH</Button>
+        </div>
+        <div className="flex flex-wrap gap-3 mt-3">
+          <Button variant="action" icon={Scale} onClick={() => sendCommand("TARE")} disabled={!connected || locked}>TARE LOAD CELLS</Button>
+          <Button variant="action" onClick={() => sendCommand("CAL_TOP")} disabled={!connected || locked}>CALIBRATE TOP</Button>
+          <Button variant="action" onClick={() => sendCommand("CAL_BOT")} disabled={!connected || locked}>CALIBRATE BOTTOM</Button>
         </div>
         {(!connected || fault) && (
           <div style={{ fontSize: 11.5, color: C.textDim, marginTop: 10 }}>
@@ -1261,10 +1345,15 @@ function AccuracyPanel({ batches, accuracy, onSave }) {
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    if (!batches.some((b) => b.id === selId) && batches[0]) setSelId(batches[0].id);
-  }, [batches]);
+    if (!batches.some((b) => b.id === selId) && batches[0]) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelId(batches[0].id);
+    }
+  }, [batches, selId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setMsg(""); }, [selId]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDraft(accuracy[selId] ? structuredClone(accuracy[selId]) : emptyBins());
   }, [selId, accuracy]);
 

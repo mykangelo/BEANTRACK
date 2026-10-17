@@ -36,6 +36,7 @@ const SHELL_BACKGROUND =
   "linear-gradient(160deg, #F9F3E4 0%, #F3E8CF 45%, #EADBBA 78%, #E2CFA6 100%)";
 
 const EMPTY_LIVE = { large: 0, medium: 0, debris: 0 };
+const TARE_TIMEOUT_MS = 6000; // give up waiting for [TARE DONE] after this long
 
 const DEFAULT_INVENTORY = {
   Arabica: { large: 5.2, medium: 7.4, debris: 2.9 },
@@ -55,6 +56,8 @@ export default function CoffeeSorterApp() {
   const [inventory, setInventory] = useState(DEFAULT_INVENTORY);
   const [historySel, setHistorySel] = useState(null);
   const [live, setLive] = useState(EMPTY_LIVE);
+  const [taring, setTaring] = useState(false);
+  const [tareDoneAt, setTareDoneAt] = useState(null);
   const [machine, setMachine] = useState({
     status: "Idle",
     batchId: nextBatchId(SEED_BATCHES),
@@ -69,6 +72,7 @@ export default function CoffeeSorterApp() {
 
   const wsRef = useRef(null);
   const tickRef = useRef(null);
+  const tareTimerRef = useRef(null);
   const runActiveRef = useRef(false);
   const runStartedAtRef = useRef(null);
 
@@ -134,6 +138,29 @@ export default function CoffeeSorterApp() {
     }));
   }
 
+  // Firmware log lines: [TARE] starts a tare, [TARE DONE] finishes it
+  function handleDeviceLog(text = "") {
+    if (text.startsWith("[TARE]")) {
+      setTaring(true);
+    } else if (text.startsWith("[TARE DONE]")) {
+      finishTare();
+    }
+  }
+
+  function finishTare() {
+    clearTimeout(tareTimerRef.current);
+    setTaring(false);
+    setTareDoneAt(Date.now());
+  }
+
+  function requestTare() {
+    if (!sendHardwareCommand("TARE")) return;
+    setTaring(true);
+    // Safety net: if the firmware never reports [TARE DONE], unlock the button
+    clearTimeout(tareTimerRef.current);
+    tareTimerRef.current = setTimeout(() => setTaring(false), TARE_TIMEOUT_MS);
+  }
+
   function connectHardware(showProgress = false) {
     const current = wsRef.current;
     if (current && [WebSocket.CONNECTING, WebSocket.OPEN].includes(current.readyState)) return;
@@ -147,6 +174,7 @@ export default function CoffeeSorterApp() {
       setConnected(true);
       setReconnecting(false);
     };
+
     socket.onmessage = (event) => {
       let message;
       try {
@@ -155,16 +183,21 @@ export default function CoffeeSorterApp() {
         return; // ignore malformed device messages
       }
       if (message.type === "telemetry") applyTelemetry(message);
+      else if (message.type === "log") handleDeviceLog(message.message);
     };
+
     socket.onerror = () => {
       setHardwareConnected(false);
       setReconnecting(false);
     };
+
     socket.onclose = () => {
       if (wsRef.current === socket) wsRef.current = null;
       setHardwareConnected(false);
       setConnected(false);
       setReconnecting(false);
+      setTaring(false);
+      clearTimeout(tareTimerRef.current);
       setMachine((m) => (m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m));
     };
   }
@@ -176,6 +209,7 @@ export default function CoffeeSorterApp() {
     return () => {
       wsRef.current?.close();
       wsRef.current = null;
+      clearTimeout(tareTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -339,9 +373,11 @@ export default function CoffeeSorterApp() {
         onStart={handleStart}
         onStop={handleStop}
         onReset={handleReset}
+        onTare={requestTare}
         connected={connected}
         fault={fault}
-        sendCommand={sendHardwareCommand}
+        taring={taring}
+        tareDoneAt={tareDoneAt}
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,

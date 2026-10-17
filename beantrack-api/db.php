@@ -1,6 +1,6 @@
 <?php
 $host = getenv('BEANTRACK_DB_HOST') ?: '127.0.0.1';
-$user = getenv('BEANTRACK_DB_USER') ?: 'myklinuxx';
+$user = getenv('BEANTRACK_DB_USER') ?: 'root';
 $pass = getenv('BEANTRACK_DB_PASS') ?: '';
 $dbname = getenv('BEANTRACK_DB_NAME') ?: 'beantrack';
 

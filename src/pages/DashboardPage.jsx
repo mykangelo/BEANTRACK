@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Gauge, Timer, Play, Square, RotateCcw, Scale, Package, Layers, Boxes, Loader2 } from "lucide-react";
+import { Activity, Gauge, Timer, Play, Square, RotateCcw, Scale, Layers, Boxes, Loader2 } from "lucide-react";
 import DashboardSetup from "../components/DashboardSetup";
 import { C, mono, display } from "../appTokens";
 import { fmtTime } from "../appUtils";
-import { CATS, CAT_LABEL } from "../appConstants";
 import { Panel, Metric, Button, IconChip, SectionLabel } from "../components/ui";
 
 const RING_COLOR = { Idle: C.lineLit, Processing: C.amber, Completed: C.green, Error: C.red };
@@ -12,10 +11,6 @@ const STATUS_DOT = { Idle: C.textFaint, Processing: C.amber, Completed: C.green,
 const MIN_CHANGE_G = 0.3;      // a deck counts as "active" only when it gains at least this much
 const ACTIVE_HOLD_MS = 1500;   // keep the active state this long after the last gain
 const DONE_SHOW_MS = 2000;     // how long "zeroed" confirmation stays visible
-
-function sum(bins) {
-  return CATS.reduce((acc, c) => acc + (bins[c] || 0), 0);
-}
 
 // Circular gauge: the arc fills with the percentage of the input that has been sorted
 function ProgressRing({ percent, color }) {
@@ -115,38 +110,9 @@ function DeckCard({ title, icon, grams, inputTarget, active, source }) {
   );
 }
 
-// Stock for one bean type. Bars are scaled against the largest bin across both beans.
-function StockPanel({ bean, bins, maxKg, barColor }) {
-  const total = sum(bins);
-  return (
-    <Panel
-      title={`Inventory — ${bean}`}
-      right={<span style={{ ...mono, fontSize: 12, color: C.amber }}>{total.toFixed(1)} kg total</span>}
-    >
-      <div className="flex flex-col gap-3">
-        {CATS.map((c) => {
-          const kg = bins[c] || 0;
-          const pct = maxKg > 0 ? (kg / maxKg) * 100 : 0;
-          return (
-            <div key={c} className="flex items-center gap-3">
-              <span style={{ fontSize: 13, color: C.textDim, width: 96 }}>{CAT_LABEL[c]}</span>
-              <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: C.glassLine }}>
-                <div style={{ width: `${pct}%`, height: "100%", background: barColor, borderRadius: 999, transition: "width 0.4s ease" }} />
-              </div>
-              <span style={{ ...mono, fontSize: 13, fontWeight: 700, width: 64, textAlign: "right" }}>{kg.toFixed(1)} kg</span>
-            </div>
-          );
-        })}
-      </div>
-    </Panel>
-  );
-}
-
 export default function DashboardPage({
   machine,
   live,
-  inventory,
-  dbDown,
   setBeanType,
   setMode,
   setSpeed,
@@ -206,8 +172,6 @@ export default function DashboardPage({
     return () => clearTimeout(t);
   }, [tareDoneAt]);
 
-  const maxKg = Math.max(0, ...CATS.flatMap((c) => [inventory.Arabica[c] || 0, inventory.Robusta[c] || 0]));
-
   const startHint = fault
     ? "Clear the fault before starting."
     : isRunning
@@ -230,7 +194,7 @@ export default function DashboardPage({
           Dashboard
         </div>
         <div style={{ fontSize: 13.5, color: C.textDim, marginTop: 3 }}>
-          Live view of the current batch and the stock on hand.
+          Live view of the current batch.
         </div>
       </div>
 
@@ -362,22 +326,6 @@ export default function DashboardPage({
           />
         </div>
       </div>
-
-      {/* stock */}
-      <div className="flex items-center gap-2" style={{ marginBottom: -8 }}>
-        <Package size={14} color={C.textFaint} />
-        <SectionLabel>STOCK ON HAND</SectionLabel>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <StockPanel bean="Arabica" bins={inventory.Arabica} maxKg={maxKg} barColor={C.arabica} />
-        <StockPanel bean="Robusta" bins={inventory.Robusta} maxKg={maxKg} barColor={C.robusta} />
-      </div>
-
-      {dbDown && (
-        <div style={{ color: C.textDim, fontSize: 12.5 }}>
-          The database is offline, so the stock and history numbers may be sample data.
-        </div>
-      )}
     </div>
   );
 }

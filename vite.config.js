@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/beantrack-api': 'http://localhost',
+      '/beantrack-api': 'http://localhost:8000',
     },
   },
 })

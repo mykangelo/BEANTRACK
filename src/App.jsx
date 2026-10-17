@@ -37,6 +37,9 @@ const SHELL_BACKGROUND =
 
 const EMPTY_LIVE = { large: 0, medium: 0, debris: 0 };
 const TARE_TIMEOUT_MS = 6000; // give up waiting for [TARE DONE] after this long
+const WS_STALE_MS = 2500; // firmware sends telemetry every 300 ms; silence means the ESP dropped
+const WS_CONNECT_TIMEOUT_MS = 5000;
+const WS_WATCH_MS = 1000;
 
 const DEFAULT_INVENTORY = {
   Arabica: { large: 5.2, medium: 7.4, debris: 2.9 },
@@ -75,6 +78,9 @@ export default function CoffeeSorterApp() {
   const tareTimerRef = useRef(null);
   const runActiveRef = useRef(false);
   const runStartedAtRef = useRef(null);
+  const lastSeenRef = useRef(0);
+  const connectStartedAtRef = useRef(0);
+  const connectHardwareRef = useRef(() => {});
 
   /* ---------- database ---------- */
   // Also used by the "Retry" button in the database banner
@@ -161,21 +167,39 @@ export default function CoffeeSorterApp() {
     tareTimerRef.current = setTimeout(() => setTaring(false), TARE_TIMEOUT_MS);
   }
 
+  function markHardwareOffline(wasLive) {
+    setHardwareConnected(false);
+    setConnected(false);
+    setReconnecting(false);
+    if (!wasLive) return;
+    setTaring(false);
+    clearTimeout(tareTimerRef.current);
+    setMachine((m) => (m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m));
+  }
+
   function connectHardware(showProgress = false) {
     const current = wsRef.current;
-    if (current && [WebSocket.CONNECTING, WebSocket.OPEN].includes(current.readyState)) return;
+    if (current && [WebSocket.CONNECTING, WebSocket.OPEN].includes(current.readyState)) {
+      if (showProgress && current.readyState === WebSocket.CONNECTING) setReconnecting(true);
+      return;
+    }
     if (showProgress) setReconnecting(true);
 
+    connectStartedAtRef.current = Date.now();
     const socket = new WebSocket(ESP32_WS_URL);
     wsRef.current = socket;
+    let opened = false;
 
     socket.onopen = () => {
+      opened = true;
+      lastSeenRef.current = Date.now();
       setHardwareConnected(true);
       setConnected(true);
       setReconnecting(false);
     };
 
     socket.onmessage = (event) => {
+      lastSeenRef.current = Date.now();
       let message;
       try {
         message = JSON.parse(event.data);
@@ -187,26 +211,46 @@ export default function CoffeeSorterApp() {
     };
 
     socket.onerror = () => {
-      setHardwareConnected(false);
       setReconnecting(false);
     };
 
     socket.onclose = () => {
       if (wsRef.current === socket) wsRef.current = null;
-      setHardwareConnected(false);
-      setConnected(false);
-      setReconnecting(false);
-      setTaring(false);
-      clearTimeout(tareTimerRef.current);
-      setMachine((m) => (m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m));
+      markHardwareOffline(opened);
     };
   }
 
-  // open the hardware socket and load data once on mount; close the socket on unmount
+  connectHardwareRef.current = connectHardware;
+
+  // open the hardware socket on mount, then watch for a silent ESP (onclose often never fires)
   useEffect(() => {
     loadFromDb();
-    connectHardware();
+    connectHardwareRef.current();
+
+    const watch = setInterval(() => {
+      const socket = wsRef.current;
+      const now = Date.now();
+
+      if (!socket || socket.readyState === WebSocket.CLOSED) {
+        if (socket) wsRef.current = null;
+        connectHardwareRef.current();
+        return;
+      }
+
+      if (socket.readyState === WebSocket.CONNECTING) {
+        if (now - connectStartedAtRef.current > WS_CONNECT_TIMEOUT_MS) socket.close();
+        return;
+      }
+
+      // TCP can stay "open" after the ESP is powered off; treat missing telemetry as a drop
+      if (socket.readyState === WebSocket.OPEN && now - lastSeenRef.current > WS_STALE_MS) {
+        markHardwareOffline(true);
+        socket.close();
+      }
+    }, WS_WATCH_MS);
+
     return () => {
+      clearInterval(watch);
       wsRef.current?.close();
       wsRef.current = null;
       clearTimeout(tareTimerRef.current);
@@ -364,8 +408,6 @@ export default function CoffeeSorterApp() {
       <DashboardPage
         machine={machine}
         live={live}
-        inventory={inventory}
-        dbDown={dbDown}
         setBeanType={setBeanType}
         setMode={setMode}
         setSpeed={setSpeed}
@@ -381,7 +423,15 @@ export default function CoffeeSorterApp() {
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
-    analytics: <AnalyticsPage batches={batches} accuracy={accuracy} onSaveAccuracy={saveAccuracy} />,
+    analytics: (
+      <AnalyticsPage
+        batches={batches}
+        inventory={inventory}
+        dbDown={dbDown}
+        accuracy={accuracy}
+        onSaveAccuracy={saveAccuracy}
+      />
+    ),
     history: <BatchHistoryPage batches={batches} sel={historySel} setSel={setHistorySel} />,
   };
 

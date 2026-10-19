@@ -57,6 +57,20 @@ String operatingMode = "Automatic";   // "Automatic" or "Manual"
 
 unsigned long lastPrintTime = 0;
 
+// Auto-stop: input target, or N seconds with no meaningful weight change
+// after beans have started landing on the decks (stuck mesh / debris loss).
+const unsigned long WEIGHT_IDLE_MS = 10000;
+const float WEIGHT_CHANGE_G        = 5.0;
+const float WEIGHT_FLOW_G          = 20.0;
+
+float batchTargetGrams = 0;
+bool  watchArmed = false;
+bool  haveBaseline = false;
+bool  seenWeightFlow = false;
+float baselineTotal = 0;
+float lastWatchedTotal = 0;
+unsigned long lastWeightChangeMs = 0;
+
 // --- Button debounce ---
 bool lastButtonState = HIGH;
 bool debouncedButtonState = HIGH;
@@ -76,6 +90,63 @@ void sendLogEvent(String msg) {
   if (wsClientConnected) {
     String jsonLog = "{\"type\":\"log\",\"message\":\"" + msg + "\"}";
     webSocket.broadcastTXT(jsonLog);
+  }
+}
+
+void armBatchWatch() {
+  watchArmed = true;
+  haveBaseline = false;
+  seenWeightFlow = false;
+  lastWeightChangeMs = millis();
+}
+
+void setSystemOff(const String& reason) {
+  systemOn = false;
+  forceFullSpeed = false;
+  watchArmed = false;
+  digitalWrite(STATUS_LED_PIN, LOW);
+  ledcWrite(PWM_CHANNEL, 0);
+  sendLogEvent(reason);
+}
+
+void setSystemOn(const String& reason) {
+  systemOn = true;
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  armBatchWatch();
+  sendLogEvent(reason);
+}
+
+float displayGrams(float filtered) {
+  return (abs(filtered) < ZERO_DEADBAND) ? 0.0 : filtered;
+}
+
+void maybeAutoStop(float totalGrams) {
+  if (!systemOn || !watchArmed) return;
+
+  unsigned long now = millis();
+  if (!haveBaseline) {
+    baselineTotal = totalGrams;
+    lastWatchedTotal = totalGrams;
+    lastWeightChangeMs = now;
+    haveBaseline = true;
+    return;
+  }
+
+  float delta = totalGrams - lastWatchedTotal;
+  if (delta < 0) delta = -delta;
+  if (delta >= WEIGHT_CHANGE_G) {
+    lastWatchedTotal = totalGrams;
+    lastWeightChangeMs = now;
+    if (totalGrams >= baselineTotal + WEIGHT_FLOW_G) seenWeightFlow = true;
+  }
+
+  if (batchTargetGrams > 0 && totalGrams >= batchTargetGrams) {
+    setSystemOff("[AUTO] Input weight reached");
+    return;
+  }
+
+  if (seenWeightFlow && (now - lastWeightChangeMs >= WEIGHT_IDLE_MS)) {
+    setSystemOff("[AUTO] Weight unchanged, batch complete");
   }
 }
 
@@ -132,10 +203,8 @@ void handleCommand(char cmd) {
     sendLogEvent(forceFullSpeed ? "[MOTOR] Forced 100% PWM" : "[MOTOR] Potentiometer Control");
   }
   else if (cmd == 's' || cmd == 'S') {
-    systemOn = !systemOn;
-    if (!systemOn) forceFullSpeed = false;
-    digitalWrite(STATUS_LED_PIN, systemOn ? HIGH : LOW);
-    sendLogEvent(systemOn ? "[CMD] System ON" : "[CMD] System OFF");
+    if (systemOn) setSystemOff("[CMD] System OFF");
+    else setSystemOn("[CMD] System ON");
   }
 }
 
@@ -183,15 +252,13 @@ void handleWebSocketMessage(String payload) {
   cmd.toUpperCase();
 
   if (cmd == "START") {
-    systemOn = true;
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    sendLogEvent("[WEB] Batch Started");
+    batchTargetGrams = jsonField(payload, "input_weight").toFloat();
+    if (batchTargetGrams < 0) batchTargetGrams = 0;
+    setSystemOn("[WEB] Batch Started");
   }
   else if (cmd == "STOP") {
-    systemOn = false;
-    forceFullSpeed = false;
-    digitalWrite(STATUS_LED_PIN, LOW);
-    sendLogEvent("[WEB] Batch Stopped");
+    batchTargetGrams = 0;
+    setSystemOff("[WEB] Batch Stopped");
   }
   else if (cmd == "TARE") {
     tareBoth();
@@ -340,11 +407,8 @@ void loop() {
     if (rawButtonReading != debouncedButtonState) {
       debouncedButtonState = rawButtonReading;
       if (debouncedButtonState == LOW) {
-        systemOn = !systemOn;
-        if (!systemOn) forceFullSpeed = false;
-
-        digitalWrite(STATUS_LED_PIN, systemOn ? HIGH : LOW);
-        sendLogEvent(systemOn ? "[BTN] System ON" : "[BTN] System OFF");
+        if (systemOn) setSystemOff("[BTN] System OFF");
+        else setSystemOn("[BTN] System ON");
       }
     }
   }
@@ -402,8 +466,9 @@ void loop() {
   if (millis() - lastPrintTime >= 300) {
     lastPrintTime = millis();
 
-    float displayTop = (abs(filteredTopGrams) < ZERO_DEADBAND) ? 0.0 : filteredTopGrams;
-    float displayBot = (abs(filteredBottomGrams) < ZERO_DEADBAND) ? 0.0 : filteredBottomGrams;
+    float displayTop = displayGrams(filteredTopGrams);
+    float displayBot = displayGrams(filteredBottomGrams);
+    maybeAutoStop(displayTop + displayBot);
 
     String activeBin = "None";
     if (systemOn) {

@@ -19,6 +19,12 @@ export const BIN_INFO = { large: "Bin 1 · >5 mm", medium: "Bin 2 · 4–5 mm", 
 export const RECOMMENDED_SPEED = 40; // recommended vibration speed (%)
 export const PROCESS_TICKS = 60;     // simulated run length (ticks)
 
+// Auto-stop a run when recovered weight is unchanged (stuck mesh / debris).
+// Logic only — not shown in the UI.
+export const WEIGHT_IDLE_MS = 10000; // no change for this long → batch complete
+export const WEIGHT_CHANGE_G = 5;    // ignore load-cell jitter below this
+export const WEIGHT_FLOW_G = 20;     // require this much gain before idle-stop
+
 // Share of the input each deck ends with in the simulator
 export const SIM_SHARE = { large: 0.41, medium: 0.39, debris: 0.2 };
 export const SIM_CATEGORIES = ["Large", "Medium", "Fine / debris"];

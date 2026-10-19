@@ -16,6 +16,9 @@ import {
   PROCESS_TICKS,
   SIM_SHARE,
   SIM_CATEGORIES,
+  WEIGHT_IDLE_MS,
+  WEIGHT_CHANGE_G,
+  WEIGHT_FLOW_G,
 } from "./appConstants";
 import { clamp, nextBatchId, mapDbBatch, normalizeBins, getJson, postJson } from "./appUtils";
 
@@ -78,6 +81,12 @@ export default function CoffeeSorterApp() {
   const lastSeenRef = useRef(0);
   const connectStartedAtRef = useRef(0);
   const connectHardwareRef = useRef(() => {});
+  const weightBaselineRef = useRef(null);
+  const lastWeightRef = useRef(0);
+  const lastWeightChangeAtRef = useRef(0);
+  const seenWeightFlowRef = useRef(false);
+  const liveTotalRef = useRef(0);
+  const inputTargetRef = useRef(1000);
 
   /* ---------- database ---------- */
   // Also used by the "Retry" button and after every successful write
@@ -299,6 +308,58 @@ export default function CoffeeSorterApp() {
     return () => clearInterval(tickRef.current);
   }, [hardwareConnected, machine.inputTarget, machine.status]);
 
+  /* ---------- auto-stop: target weight, or idle scale after beans have arrived ---------- */
+  liveTotalRef.current = live.large + live.medium;
+  inputTargetRef.current = machine.inputTarget;
+
+  function resetWeightWatch() {
+    weightBaselineRef.current = null;
+    lastWeightRef.current = 0;
+    lastWeightChangeAtRef.current = Date.now();
+    seenWeightFlowRef.current = false;
+  }
+
+  function handleStop() {
+    sendHardwareCommand({ command: "STOP" });
+    setMachine((m) => ({ ...m, status: m.status === "Processing" ? "Idle" : m.status }));
+  }
+
+  useEffect(() => {
+    if (machine.status !== "Processing") return;
+
+    const tick = () => {
+      const total = liveTotalRef.current;
+      const now = Date.now();
+
+      if (weightBaselineRef.current === null) {
+        weightBaselineRef.current = total;
+        lastWeightRef.current = total;
+        lastWeightChangeAtRef.current = now;
+        return;
+      }
+
+      if (Math.abs(total - lastWeightRef.current) >= WEIGHT_CHANGE_G) {
+        lastWeightRef.current = total;
+        lastWeightChangeAtRef.current = now;
+        if (total >= weightBaselineRef.current + WEIGHT_FLOW_G) seenWeightFlowRef.current = true;
+      }
+
+      if (total >= inputTargetRef.current) {
+        handleStop();
+        return;
+      }
+
+      if (seenWeightFlowRef.current && now - lastWeightChangeAtRef.current >= WEIGHT_IDLE_MS) {
+        handleStop();
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machine.status]);
+
   /* ---------- save a finished run ---------- */
   // Runs when a run ends (Completed in simulation, or Idle after hardware finishes).
   // The server writes the batch and its stock movements in one transaction.
@@ -337,6 +398,7 @@ export default function CoffeeSorterApp() {
   function resetRun() {
     runActiveRef.current = false;
     runStartedAtRef.current = null;
+    resetWeightWatch();
     setLive(EMPTY_LIVE);
     setMachine((m) => ({ ...m, status: "Idle", processingTime: 0, liveWeight: 0, sortingCategory: "—" }));
   }
@@ -367,20 +429,17 @@ export default function CoffeeSorterApp() {
 
     runActiveRef.current = true;
     runStartedAtRef.current = Date.now();
-    sendHardwareCommand({ command: "START" }); // returns false offline, so the simulator runs instead
+    resetWeightWatch();
+    sendHardwareCommand({ command: "START", input_weight: machine.inputTarget });
     setLive(EMPTY_LIVE);
     setMachine((m) => ({ ...m, status: "Processing", processingTime: 0, liveWeight: 0 }));
-  }
-
-  function handleStop() {
-    sendHardwareCommand({ command: "STOP" });
-    setMachine((m) => ({ ...m, status: m.status === "Processing" ? "Idle" : m.status }));
   }
 
   function handleReset() {
     clearInterval(tickRef.current);
     runActiveRef.current = false;
     runStartedAtRef.current = null;
+    resetWeightWatch();
     setFault(null);
     setLive(EMPTY_LIVE);
     setMachine((m) => ({

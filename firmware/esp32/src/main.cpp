@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WebSocketsServer.h>
+#include <Preferences.h>
 #include "HX711.h"
 #include "wifi_settings.h"
 
@@ -48,6 +49,10 @@ long rawZeroBottom = 0;
 long deltaTop      = 0;
 long deltaBottom   = 0;
 
+// --- Soft start: motor PWM ramps toward the target instead of jumping ---
+const int RAMP_STEP_PER_LOOP = 2;   // higher = faster ramp, more inrush
+int rampSpeed = 0;
+
 // --- System and operating state ---
 bool systemOn = false;
 bool forceFullSpeed = false;
@@ -80,7 +85,28 @@ void sendLogEvent(String msg) {
 }
 
 // ---------------------------------------------------------------
-// Tare both decks to zero
+// Saved zero offsets: survive reboots so a reset does not lose the zero
+// ---------------------------------------------------------------
+void saveZeros() {
+  Preferences p;
+  p.begin("cal", false);
+  p.putLong("zeroTop", rawZeroTop);
+  p.putLong("zeroBottom", rawZeroBottom);
+  p.end();
+}
+
+void loadZeros() {
+  Preferences p;
+  p.begin("cal", true);
+  rawZeroTop    = p.getLong("zeroTop", 0);
+  rawZeroBottom = p.getLong("zeroBottom", 0);
+  p.end();
+  topScaleLeft.set_offset(rawZeroTop);
+  bottomScaleRight.set_offset(rawZeroBottom);
+}
+
+// ---------------------------------------------------------------
+// Tare both decks to zero (user action only)
 // ---------------------------------------------------------------
 void tareBoth() {
   sendLogEvent("[TARE] Zeroing both decks... keep hands off!");
@@ -100,6 +126,7 @@ void tareBoth() {
     deltaBottom = 0;
   }
 
+  saveZeros();
   sendLogEvent("[TARE DONE] Decks zeroed to 0.0 g!");
 }
 
@@ -222,7 +249,13 @@ void handleWebSocketMessage(String payload) {
       return;
     }
     sendLogEvent("[WIFI] Saved " + ssid + ". Restarting to join it.");
-    delay(800);      // let the log line reach the dashboard before restarting
+    delay(800);
+    ESP.restart();
+  }
+  else if (cmd == "RESET_WIFI") {
+    WifiSettings::clearSaved();
+    sendLogEvent("[WIFI] Saved network cleared. Restarting into setup mode.");
+    delay(800);
     ESP.restart();
   }
 }
@@ -282,6 +315,9 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Reset reason: 9 = brownout. Shows whether a reboot was a power dip.
+  Serial.printf("[BOOT] Reset reason: %d\n", (int)esp_reset_reason());
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
@@ -307,8 +343,10 @@ void setup() {
     WifiSettings::startSetupAP();
   }
 
-  // Zero scales on startup
-  tareBoth();
+  // Restore the last zero instead of re-taring on every boot.
+  // A tare happens only when the user presses Tare.
+  loadZeros();
+  sendLogEvent("[BOOT] Restored last zero. Press Tare if the decks were changed.");
 }
 
 // ---------------------------------------------------------------
@@ -381,7 +419,10 @@ void loop() {
     }
   }
 
-  ledcWrite(PWM_CHANNEL, motorSpeed);
+  // Soft start: ramp up gradually to limit inrush; drop immediately on stop
+  if (rampSpeed < motorSpeed) rampSpeed = min(motorSpeed, rampSpeed + RAMP_STEP_PER_LOOP);
+  else                        rampSpeed = motorSpeed;
+  ledcWrite(PWM_CHANNEL, rampSpeed);
 
   // 4. Sample and filter load cells
   if (topScaleLeft.is_ready()) {

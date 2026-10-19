@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { Wifi, WifiOff, Database, Package } from "lucide-react";
+import { Database, Package } from "lucide-react";
 import "./App.css";
+
+// 1. IMPORT THE LOGO HERE
+import logo from "./assets/logo.jpg";
 
 import DashboardPage from "./pages/DashboardPage";
 import SortingWeightMonitor from "./pages/SortingWeightMonitor";
@@ -25,8 +28,8 @@ const SHELL_BACKGROUND =
   "linear-gradient(160deg, #F9F3E4 0%, #F3E8CF 45%, #EADBBA 78%, #E2CFA6 100%)";
 
 const EMPTY_LIVE = { large: 0, medium: 0, debris: 0 };
-const TARE_TIMEOUT_MS = 6000;   // give up waiting for [TARE DONE] after this long
-const WS_STALE_MS = 2500;       // firmware sends telemetry every 300 ms; silence means the ESP dropped
+const TARE_TIMEOUT_MS = 6000;
+const WS_STALE_MS = 2500;
 const WS_CONNECT_TIMEOUT_MS = 5000;
 const WS_WATCH_MS = 1000;
 
@@ -43,15 +46,15 @@ const EMPTY_INVENTORY = {
 export default function CoffeeSorterApp() {
   /* ---------- state ---------- */
   const [view, setView] = useState("dashboard");
-  const [network, setNetwork] = useState("");          // Wi-Fi name reported by the ESP32
-  const [wifiPending, setWifiPending] = useState(false); // true while the ESP32 restarts after a Wi-Fi change
+  const [network, setNetwork] = useState("");
+  const [wifiPending, setWifiPending] = useState(false);
   const [connected, setConnected] = useState(false);
   const [hardwareConnected, setHardwareConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [dbDown, setDbDown] = useState(false);
   const [fault, setFault] = useState(null);
-  const [notice, setNotice] = useState(null);           // e.g. start blocked by stock
-  const [saveError, setSaveError] = useState(null);     // batch the server refused to save
+  const [notice, setNotice] = useState(null);
+  const [saveError, setSaveError] = useState(null);
   const [batches, setBatches] = useState(SEED_BATCHES);
   const [inventory, setInventory] = useState(EMPTY_INVENTORY);
   const [historySel, setHistorySel] = useState(null);
@@ -80,7 +83,6 @@ export default function CoffeeSorterApp() {
   const connectHardwareRef = useRef(() => {});
 
   /* ---------- database ---------- */
-  // Also used by the "Retry" button and after every successful write
   function loadFromDb() {
     getJson("get_batches.php")
       .then((rows) => {
@@ -104,7 +106,6 @@ export default function CoffeeSorterApp() {
       .catch(() => setDbDown(true));
   }
 
-  // Record a receipt. The database rejects anything other than a receipt.
   function addMovement(payload) {
     return postJson("add_movement.php", payload)
       .then((res) => {
@@ -144,8 +145,6 @@ export default function CoffeeSorterApp() {
     }));
   }
 
-  // Firmware log lines: [TARE] starts a tare, [TARE DONE] finishes it,
-  // and a rejected Wi-Fi change clears the waiting state
   function handleDeviceLog(text = "") {
     if (text.startsWith("[TARE]")) {
       setTaring(true);
@@ -165,19 +164,20 @@ export default function CoffeeSorterApp() {
   function requestTare() {
     if (!sendHardwareCommand("TARE")) return;
     setTaring(true);
-    // Safety net: if the firmware never reports [TARE DONE], unlock the button
     clearTimeout(tareTimerRef.current);
     tareTimerRef.current = setTimeout(() => setTaring(false), TARE_TIMEOUT_MS);
   }
 
-  // Sends the new network to the ESP32, which saves it and restarts
+  function resetWifi() {
+    return sendHardwareCommand({ command: "RESET_WIFI" });
+  }
+
   function saveWifi(ssid, password) {
     const sent = sendHardwareCommand({ command: "SET_WIFI", ssid, password });
     if (sent) setWifiPending(true);
     return sent;
   }
 
-  // Once the ESP32 is reachable again, the Wi-Fi change is finished
   useEffect(() => {
     if (connected) setWifiPending(false);
   }, [connected]);
@@ -219,7 +219,7 @@ export default function CoffeeSorterApp() {
       try {
         message = JSON.parse(event.data);
       } catch {
-        return; // ignore malformed device messages
+        return;
       }
       if (message.type === "telemetry") applyTelemetry(message);
       else if (message.type === "log") handleDeviceLog(message.message);
@@ -237,8 +237,6 @@ export default function CoffeeSorterApp() {
 
   connectHardwareRef.current = connectHardware;
 
-  // Open the socket on mount, load the database, and watch for a silent ESP
-  // (onclose often never fires when the board loses power)
   useEffect(() => {
     loadFromDb();
     connectHardwareRef.current();
@@ -258,7 +256,6 @@ export default function CoffeeSorterApp() {
         return;
       }
 
-      // TCP can stay "open" after the ESP is powered off; treat missing telemetry as a drop
       if (socket.readyState === WebSocket.OPEN && now - lastSeenRef.current > WS_STALE_MS) {
         markHardwareOffline(true);
         socket.close();
@@ -274,7 +271,7 @@ export default function CoffeeSorterApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---------- simulated sensor stream (used when hardware is absent) ---------- */
+  /* ---------- simulated sensor stream ---------- */
   useEffect(() => {
     if (machine.status !== "Processing" || hardwareConnected) return;
     const target = machine.inputTarget;
@@ -300,8 +297,6 @@ export default function CoffeeSorterApp() {
   }, [hardwareConnected, machine.inputTarget, machine.status]);
 
   /* ---------- save a finished run ---------- */
-  // Runs when a run ends (Completed in simulation, or Idle after hardware finishes).
-  // The server writes the batch and its stock movements in one transaction.
   useEffect(() => {
     if (!runActiveRef.current || !["Completed", "Idle"].includes(machine.status)) return;
     runActiveRef.current = false;
@@ -324,7 +319,7 @@ export default function CoffeeSorterApp() {
       .then((res) => {
         if (res.success) {
           setSaveError(null);
-          loadFromDb(); // refreshes batches, stock, and the movement log
+          loadFromDb();
         } else {
           setSaveError(res.error || "Batch was not saved.");
         }
@@ -354,7 +349,6 @@ export default function CoffeeSorterApp() {
   function handleStart() {
     if (machine.status === "Processing" || fault) return;
 
-    // Block a run when green bean stock can't cover the input (skipped if the database is down)
     const onHand = inventory.stock?.[machine.beanType] ?? 0;
     if (!dbDown && onHand < machine.inputTarget) {
       setNotice(
@@ -367,7 +361,7 @@ export default function CoffeeSorterApp() {
 
     runActiveRef.current = true;
     runStartedAtRef.current = Date.now();
-    sendHardwareCommand({ command: "START" }); // returns false offline, so the simulator runs instead
+    sendHardwareCommand({ command: "START" });
     setLive(EMPTY_LIVE);
     setMachine((m) => ({ ...m, status: "Processing", processingTime: 0, liveWeight: 0 }));
   }
@@ -430,13 +424,14 @@ export default function CoffeeSorterApp() {
         onStop={handleStop}
         onReset={handleReset}
         onTare={requestTare}
-        onSaveWifi={saveWifi}
-        wifiPending={wifiPending}
         currentNetwork={network}
         connected={connected}
         fault={fault}
         taring={taring}
         tareDoneAt={tareDoneAt}
+        onReconnect={reconnect}
+        reconnecting={reconnecting}
+        onResetWifi={resetWifi}
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
@@ -471,10 +466,18 @@ export default function CoffeeSorterApp() {
         }}
       >
         <div className="flex items-center gap-2 shrink-0" style={{ padding: "10px 4px" }}>
+          {/* 2. UPDATED IMAGE TAG TO USE THE IMPORTED LOGO */}
           <img
-            src="/beanhi-logo.png"
+            src={logo}
             alt="Beanhi logo"
-            style={{ width: 42, height: 42, borderRadius: "50%", flexShrink: 0, boxShadow: "0 0 0 2px rgba(255,255,255,0.18)" }}
+            style={{ 
+              width: 42, 
+              height: 42, 
+              borderRadius: "50%", 
+              flexShrink: 0, 
+              boxShadow: "0 0 0 2px rgba(255,255,255,0.18)",
+              objectFit: "cover" 
+            }}
           />
           <div>
             <div style={{ ...display, fontSize: 21, fontWeight: 700, lineHeight: 1.1, color: C.sidebarText }}>Beanhi</div>
@@ -513,32 +516,6 @@ export default function CoffeeSorterApp() {
             );
           })}
         </nav>
-
-        <div
-          className="flex items-center gap-2 shrink-0"
-          role="status"
-          style={{
-            background: connected ? "rgba(92,59,30,0.22)" : "rgba(34,22,9,0.92)",
-            border: `1px solid ${connected ? C.green : C.amber}88`,
-            borderRadius: 999,
-            color: C.sidebarText,
-            padding: "7px 9px 7px 11px",
-            ...mono,
-            fontSize: 11,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {connected ? <Wifi size={14} color={C.amber} /> : <WifiOff size={14} color={C.amber} />}
-          <span>{reconnecting ? "Connecting..." : `ESP32 ${connected ? "online" : "offline"}`}</span>
-          {!connected && !reconnecting && (
-            <button
-              onClick={reconnect}
-              style={{ background: C.amber, color: C.text, border: "none", borderRadius: 999, padding: "4px 9px", cursor: "pointer", ...mono, fontSize: 10.5, fontWeight: 700 }}
-            >
-              Reconnect
-            </button>
-          )}
-        </div>
       </header>
 
       {/* main */}

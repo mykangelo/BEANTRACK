@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Timer, Play, Square, RotateCcw, Scale, Layers, Boxes, Loader2 } from "lucide-react";
+import { Activity, Timer, Play, Square, RotateCcw, Scale, Layers, Boxes, Loader2, Wifi } from "lucide-react";
 import DashboardSetup from "../components/DashboardSetup";
-import WifiSetupPanel from "../components/WifiSetupPanel";
+import WifiResetConfirm from "../components/WifiResetConfirm";
+import WifiSetupModal from "../components/WifiSetupModal";
 import { C, mono, display } from "../appTokens";
 import { fmtTime, sortingLoss } from "../appUtils";
 import { Panel, Metric, Button, IconChip, SectionLabel } from "../components/ui";
@@ -122,14 +123,18 @@ export default function DashboardPage({
   onStop,
   onReset,
   onTare,
-  onSaveWifi,
-  wifiPending,
+  onReconnect,
+  onResetWifi,
+  reconnecting,
   currentNetwork,
   connected,
   fault,
   taring,
   tareDoneAt,
 }) {
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showWifiModal, setShowWifiModal] = useState(false);
+
   // Two physical decks: top = large grade, bottom = medium grade
   const top = live.large;
   const bottom = live.medium;
@@ -175,6 +180,17 @@ export default function DashboardPage({
     return () => clearTimeout(t);
   }, [tareDoneAt]);
 
+  // Change Wi-Fi asks first; the reset is sent only after the user confirms
+  function handleChangeWifi() {
+    setShowResetConfirm(true);
+  }
+
+  function confirmResetWifi() {
+    setShowResetConfirm(false);
+    onResetWifi();          // sends RESET_WIFI if the board is online
+    setShowWifiModal(true); // then show the setup instructions
+  }
+
   const startHint = fault
     ? "Clear the fault before starting."
     : isRunning
@@ -188,6 +204,12 @@ export default function DashboardPage({
     : showDone
     ? "Decks zeroed to 0.0 g."
     : startHint;
+
+  const connectionText = reconnecting
+    ? "Connecting to the ESP32..."
+    : connected
+    ? `Online${currentNetwork ? ` on "${currentNetwork}"` : ""}`
+    : "Offline. Check that the ESP32 is powered and on your Wi-Fi.";
 
   return (
     <div className="flex flex-col gap-5 w-full max-w-6xl mx-auto">
@@ -328,15 +350,53 @@ export default function DashboardPage({
             setInputTarget={setInputTarget}
             vertical
           />
-          <WifiSetupPanel
-            connected={connected}
-            isRunning={isRunning}
-            currentNetwork={currentNetwork}
-            pending={wifiPending}
-            onSave={onSaveWifi}
-          />
+
+          <Panel
+            title={
+              <span className="flex items-center gap-2">
+                <IconChip icon={Wifi} />
+                ESP32 connection
+              </span>
+            }
+          >
+            <div style={{ fontSize: 12.5, color: C.textDim, marginBottom: 12, lineHeight: 1.5 }}>
+              {connectionText}
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              {!connected && (
+                <Button variant="action" icon={Wifi} onClick={onReconnect} disabled={reconnecting}>
+                  Reconnect
+                </Button>
+              )}
+              {connected ? (
+                <Button variant="action" icon={Wifi} onClick={handleChangeWifi}>
+                  Change Wi-Fi
+                </Button>
+              ) : (
+                <Button variant="action" icon={Wifi} onClick={() => setShowWifiModal(true)}>
+                  Set up Wi-Fi
+                </Button>
+              )}
+            </div>
+          </Panel>
         </div>
       </div>
+
+      {showResetConfirm && (
+        <WifiResetConfirm
+          onCancel={() => setShowResetConfirm(false)}
+          onConfirm={confirmResetWifi}
+        />
+      )}
+
+      {showWifiModal && (
+        <WifiSetupModal
+          onClose={() => setShowWifiModal(false)}
+          connected={connected}
+          currentNetwork={currentNetwork}
+        />
+      )}
     </div>
   );
 }

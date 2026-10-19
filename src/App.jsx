@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { Database, Package } from "lucide-react";
+import { Database, Package } from "lucide-react"; 
 import "./App.css";
 
-// 1. IMPORT THE LOGO HERE
 import logo from "./assets/logo.jpg";
 
 import DashboardPage from "./pages/DashboardPage";
@@ -33,7 +32,6 @@ const WS_STALE_MS = 2500;
 const WS_CONNECT_TIMEOUT_MS = 5000;
 const WS_WATCH_MS = 1000;
 
-// Shape returned by get_inventory.php, before the first load
 const EMPTY_INVENTORY = {
   stock: { Arabica: 0, Robusta: 0 },
   totals: {
@@ -44,7 +42,6 @@ const EMPTY_INVENTORY = {
 };
 
 export default function CoffeeSorterApp() {
-  /* ---------- state ---------- */
   const [view, setView] = useState("dashboard");
   const [network, setNetwork] = useState("");
   const [wifiPending, setWifiPending] = useState(false);
@@ -55,6 +52,10 @@ export default function CoffeeSorterApp() {
   const [fault, setFault] = useState(null);
   const [notice, setNotice] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  
+  // State for Calibration Notices
+  const [calibNotice, setCalibNotice] = useState(null);
+
   const [batches, setBatches] = useState(SEED_BATCHES);
   const [inventory, setInventory] = useState(EMPTY_INVENTORY);
   const [historySel, setHistorySel] = useState(null);
@@ -82,7 +83,6 @@ export default function CoffeeSorterApp() {
   const connectStartedAtRef = useRef(0);
   const connectHardwareRef = useRef(() => {});
 
-  /* ---------- database ---------- */
   function loadFromDb() {
     getJson("get_batches.php")
       .then((rows) => {
@@ -118,7 +118,6 @@ export default function CoffeeSorterApp() {
       });
   }
 
-  /* ---------- ESP32 connection ---------- */
   function sendHardwareCommand(command) {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(typeof command === "string" ? command : JSON.stringify(command));
@@ -145,13 +144,24 @@ export default function CoffeeSorterApp() {
     }));
   }
 
+  // Catch the Success/Error messages from ESP32
   function handleDeviceLog(text = "") {
+    console.log("[Device Log]", text); // Helpful for debugging!
+    
     if (text.startsWith("[TARE]")) {
       setTaring(true);
     } else if (text.startsWith("[TARE DONE]")) {
       finishTare();
     } else if (text.startsWith("[WIFI] Not saved")) {
       setWifiPending(false);
+    } else if (text.includes("Success! New factor:")) {
+      setTaring(false);
+      clearTimeout(tareTimerRef.current);
+      setCalibNotice({ severity: "success", title: "Calibration Successful", message: text });
+    } else if (text.includes("[CAL] Error:")) {
+      setTaring(false);
+      clearTimeout(tareTimerRef.current);
+      setCalibNotice({ severity: "error", title: "Calibration Failed", message: text });
     }
   }
 
@@ -166,6 +176,33 @@ export default function CoffeeSorterApp() {
     setTaring(true);
     clearTimeout(tareTimerRef.current);
     tareTimerRef.current = setTimeout(() => setTaring(false), TARE_TIMEOUT_MS);
+  }
+
+  // UPDATED: Catch send failure and show error immediately
+  function handleCalibrate(deck, weight) {
+    const cmd = deck === "TOP" ? "CALIBRATE_TOP" : "CALIBRATE_BOT";
+    const sent = sendHardwareCommand({ command: cmd, weight: weight });
+    
+    if (!sent) {
+      setCalibNotice({ 
+        severity: "error", 
+        title: "Connection Error", 
+        message: "Failed to send command. Check if the ESP32 is connected." 
+      });
+      return;
+    }
+    
+    setCalibNotice(null); 
+    setTaring(true); 
+    clearTimeout(tareTimerRef.current);
+    tareTimerRef.current = setTimeout(() => {
+      setTaring(false);
+      setCalibNotice({ 
+        severity: "error", 
+        title: "Timeout", 
+        message: "The ESP32 did not respond to the calibration command. Check your connections." 
+      });
+    }, 10000); 
   }
 
   function resetWifi() {
@@ -271,7 +308,6 @@ export default function CoffeeSorterApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---------- simulated sensor stream ---------- */
   useEffect(() => {
     if (machine.status !== "Processing" || hardwareConnected) return;
     const target = machine.inputTarget;
@@ -296,7 +332,6 @@ export default function CoffeeSorterApp() {
     return () => clearInterval(tickRef.current);
   }, [hardwareConnected, machine.inputTarget, machine.status]);
 
-  /* ---------- save a finished run ---------- */
   useEffect(() => {
     if (!runActiveRef.current || !["Completed", "Idle"].includes(machine.status)) return;
     runActiveRef.current = false;
@@ -328,7 +363,6 @@ export default function CoffeeSorterApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine.status]);
 
-  /* ---------- actions ---------- */
   function resetRun() {
     runActiveRef.current = false;
     runStartedAtRef.current = null;
@@ -408,7 +442,6 @@ export default function CoffeeSorterApp() {
     setMachine((m) => ({ ...m, inputTarget: value }));
   }
 
-  /* ---------- render ---------- */
   const faultInfo = fault ? FAULTS[fault] : null;
 
   const pages = {
@@ -424,6 +457,7 @@ export default function CoffeeSorterApp() {
         onStop={handleStop}
         onReset={handleReset}
         onTare={requestTare}
+        onCalibrate={handleCalibrate}
         currentNetwork={network}
         connected={connected}
         fault={fault}
@@ -432,6 +466,8 @@ export default function CoffeeSorterApp() {
         onReconnect={reconnect}
         reconnecting={reconnecting}
         onResetWifi={resetWifi}
+        calibNotice={calibNotice}         
+        setCalibNotice={setCalibNotice}   
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
@@ -444,12 +480,10 @@ export default function CoffeeSorterApp() {
       className="w-full h-full min-h-[720px] flex flex-col p-4 gap-4"
       style={{ position: "relative", overflow: "hidden", background: SHELL_BACKGROUND, color: C.text, ...sans }}
     >
-      {/* soft glow blobs behind the frosted glass */}
       <div style={{ position: "absolute", top: -120, right: -80, width: 460, height: 460, borderRadius: "50%", background: "#EBC163", opacity: 0.2, filter: "blur(140px)", pointerEvents: "none" }} />
       <div style={{ position: "absolute", bottom: -160, left: 120, width: 520, height: 520, borderRadius: "50%", background: "#A97C50", opacity: 0.13, filter: "blur(150px)", pointerEvents: "none" }} />
       <div style={{ position: "absolute", top: "35%", left: "45%", width: 320, height: 320, borderRadius: "50%", background: "#FFF8E6", opacity: 0.55, filter: "blur(120px)", pointerEvents: "none" }} />
 
-      {/* top navigation */}
       <header
         className="flex items-center gap-4 shrink-0"
         style={{
@@ -466,18 +500,10 @@ export default function CoffeeSorterApp() {
         }}
       >
         <div className="flex items-center gap-2 shrink-0" style={{ padding: "10px 4px" }}>
-          {/* 2. UPDATED IMAGE TAG TO USE THE IMPORTED LOGO */}
           <img
             src={logo}
             alt="Beanhi logo"
-            style={{ 
-              width: 42, 
-              height: 42, 
-              borderRadius: "50%", 
-              flexShrink: 0, 
-              boxShadow: "0 0 0 2px rgba(255,255,255,0.18)",
-              objectFit: "cover" 
-            }}
+            style={{ width: 42, height: 42, borderRadius: "50%", flexShrink: 0, boxShadow: "0 0 0 2px rgba(255,255,255,0.18)", objectFit: "cover" }}
           />
           <div>
             <div style={{ ...display, fontSize: 21, fontWeight: 700, lineHeight: 1.1, color: C.sidebarText }}>Beanhi</div>
@@ -518,7 +544,6 @@ export default function CoffeeSorterApp() {
         </nav>
       </header>
 
-      {/* main */}
       <main className="flex-1 flex flex-col min-w-0 gap-3" style={{ position: "relative" }}>
         {(!connected || faultInfo || dbDown || notice || saveError) && (
           <div className="flex flex-col gap-3 shrink-0">

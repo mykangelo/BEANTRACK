@@ -3,20 +3,24 @@
 #include <ESPmDNS.h>
 #include <WebSocketsServer.h>
 #include <Preferences.h>
+#include <ArduinoOTA.h> 
 #include "HX711.h"
 #include "wifi_settings.h"
 
-// --- mDNS name (the Wi-Fi name and password are stored on the ESP32, not here) ---
-const char* MDNS_HOSTNAME = "beantrack";   // reachable at ws://beantrack.local:81
+// --- mDNS name ---
+const char* MDNS_HOSTNAME = "beantrack"; 
 
 // --- WebSocket server on port 81 ---
 WebSocketsServer webSocket = WebSocketsServer(81);
 bool wsClientConnected = false;
 
+// --- NEW: OTA State Flag ---
+volatile bool isUpdating = false; 
+
 // --- Pin definitions ---
-const int LEFT_DT   = 32;   // Top (large) deck
+const int LEFT_DT   = 32;   
 const int LEFT_SCK  = 33;
-const int RIGHT_DT  = 26;   // Bottom (medium) deck
+const int RIGHT_DT  = 26;   
 const int RIGHT_SCK = 27;
 
 const int BUTTON_PIN     = 14;
@@ -24,7 +28,7 @@ const int MOTOR_PIN      = 25;
 const int POT_PIN        = 34;
 const int STATUS_LED_PIN = 4;
 
-// --- ESP32 LEDC PWM (Arduino core v2 API, pinned in platformio.ini) ---
+// --- ESP32 LEDC PWM ---
 const int PWM_CHANNEL = 0;
 const int PWM_FREQ    = 5000;
 const int PWM_RES     = 8;
@@ -32,10 +36,9 @@ const int PWM_RES     = 8;
 HX711 topScaleLeft;
 HX711 bottomScaleRight;
 
-// --- Calibration factors ---
+// --- Calibration factors (Defaults if nothing saved in NVM) ---
 float calFactorTopLeft     = 116.3;
 float calFactorBottomRight = 116.3;
-const float KNOWN_WEIGHT_G = 165.0;
 
 // --- EMA filtering and deadband ---
 const float FILTER_ALPHA  = 0.15;
@@ -49,16 +52,16 @@ long rawZeroBottom = 0;
 long deltaTop      = 0;
 long deltaBottom   = 0;
 
-// --- Soft start: motor PWM ramps toward the target instead of jumping ---
-const int RAMP_STEP_PER_LOOP = 2;   // higher = faster ramp, more inrush
+// --- Soft start ---
+const int RAMP_STEP_PER_LOOP = 2; 
 int rampSpeed = 0;
 
 // --- System and operating state ---
 bool systemOn = false;
 bool forceFullSpeed = false;
-bool webSpeedOverride = false;        // true when the web slider sets speed
+bool webSpeedOverride = false;        
 int  webTargetSpeedPercent = 40;
-String operatingMode = "Automatic";   // "Automatic" or "Manual"
+String operatingMode = "Automatic";   
 
 unsigned long lastPrintTime = 0;
 
@@ -73,9 +76,6 @@ int smoothedPotValue = 0;
 int lastPotPercent = 0;
 const float POT_ALPHA = 0.2;
 
-// ---------------------------------------------------------------
-// Logging: USB Serial and, if a dashboard is connected, the web UI
-// ---------------------------------------------------------------
 void sendLogEvent(String msg) {
   Serial.println(msg);
   if (wsClientConnected) {
@@ -85,28 +85,37 @@ void sendLogEvent(String msg) {
 }
 
 // ---------------------------------------------------------------
-// Saved zero offsets: survive reboots so a reset does not lose the zero
+// NVM: Save and Load BOTH Zeros and Calibration Factors
 // ---------------------------------------------------------------
-void saveZeros() {
+void saveSettings() {
   Preferences p;
   p.begin("cal", false);
   p.putLong("zeroTop", rawZeroTop);
   p.putLong("zeroBottom", rawZeroBottom);
+  p.putFloat("calTop", calFactorTopLeft);
+  p.putFloat("calBottom", calFactorBottomRight);
   p.end();
 }
 
-void loadZeros() {
+void loadSettings() {
   Preferences p;
   p.begin("cal", true);
   rawZeroTop    = p.getLong("zeroTop", 0);
   rawZeroBottom = p.getLong("zeroBottom", 0);
+  calFactorTopLeft = p.getFloat("calTop", 116.3);
+  calFactorBottomRight = p.getFloat("calBottom", 116.3);
   p.end();
+  
   topScaleLeft.set_offset(rawZeroTop);
   bottomScaleRight.set_offset(rawZeroBottom);
+  topScaleLeft.set_scale(calFactorTopLeft);
+  bottomScaleRight.set_scale(calFactorBottomRight);
+  
+  Serial.println("[NVM] Loaded Calibrations. Top: " + String(calFactorTopLeft) + " | Bot: " + String(calFactorBottomRight));
 }
 
 // ---------------------------------------------------------------
-// Tare both decks to zero (user action only)
+// Tare both decks to zero
 // ---------------------------------------------------------------
 void tareBoth() {
   sendLogEvent("[TARE] Zeroing both decks... keep hands off!");
@@ -126,74 +135,82 @@ void tareBoth() {
     deltaBottom = 0;
   }
 
-  saveZeros();
+  saveSettings();
   sendLogEvent("[TARE DONE] Decks zeroed to 0.0 g!");
 }
 
 // ---------------------------------------------------------------
-// Single-character commands (USB Serial and WebSocket)
+// Dynamic Calibration Logic
 // ---------------------------------------------------------------
+void calibrateDeck(bool isTop, float knownWeight) {
+  if (knownWeight <= 0) {
+    sendLogEvent("[CAL] Error: Known weight must be > 0.");
+    return;
+  }
+
+  if (isTop) {
+    sendLogEvent("[CAL TOP] Calibrating with " + String(knownWeight) + "g...");
+    if (!topScaleLeft.wait_ready_timeout(1000)) return;
+    long measuredDelta = topScaleLeft.read_average(30) - rawZeroTop;
+    if (measuredDelta == 0) { sendLogEvent("[CAL] Error: No weight detected."); return; }
+    
+    calFactorTopLeft = abs((float)measuredDelta / knownWeight);
+    topScaleLeft.set_scale(calFactorTopLeft);
+    saveSettings();
+    sendLogEvent("[CAL TOP] Success! New factor: " + String(calFactorTopLeft, 2));
+  } else {
+    sendLogEvent("[CAL BOT] Calibrating with " + String(knownWeight) + "g...");
+    if (!bottomScaleRight.wait_ready_timeout(1000)) return;
+    long measuredDelta = bottomScaleRight.read_average(30) - rawZeroBottom;
+    if (measuredDelta == 0) { sendLogEvent("[CAL] Error: No weight detected."); return; }
+    
+    calFactorBottomRight = abs((float)measuredDelta / knownWeight);
+    bottomScaleRight.set_scale(calFactorBottomRight);
+    saveSettings();
+    sendLogEvent("[CAL BOT] Success! New factor: " + String(calFactorBottomRight, 2));
+  }
+}
+
 void handleCommand(char cmd) {
   if (cmd == 't' || cmd == 'T') {
     tareBoth();
-  }
-  else if (cmd == '1') {
-    sendLogEvent("[CAL TOP] Calibrating Top Deck (Left)...");
-    long measuredDelta = topScaleLeft.read_average(30) - rawZeroTop;
-    calFactorTopLeft = (float)measuredDelta / KNOWN_WEIGHT_G;
-    topScaleLeft.set_scale(calFactorTopLeft);
-    sendLogEvent(">>> NEW calFactorTopLeft = " + String(calFactorTopLeft, 2));
-  }
-  else if (cmd == '2') {
-    sendLogEvent("[CAL BOT] Calibrating Bottom Deck (Right)...");
-    long measuredDelta = bottomScaleRight.read_average(30) - rawZeroBottom;
-    calFactorBottomRight = (float)measuredDelta / KNOWN_WEIGHT_G;
-    bottomScaleRight.set_scale(calFactorBottomRight);
-    sendLogEvent(">>> NEW calFactorBottomRight = " + String(calFactorBottomRight, 2));
-  }
-  else if (cmd == 'f' || cmd == 'F') {
+  } else if (cmd == '1') {
+    calibrateDeck(true, 100.0); 
+  } else if (cmd == '2') {
+    calibrateDeck(false, 100.0);
+  } else if (cmd == 'f' || cmd == 'F') {
     forceFullSpeed = !forceFullSpeed;
     webSpeedOverride = false;
     systemOn = true;
     digitalWrite(STATUS_LED_PIN, HIGH);
     sendLogEvent(forceFullSpeed ? "[MOTOR] Forced 100% PWM" : "[MOTOR] Potentiometer Control");
-  }
-  else if (cmd == 's' || cmd == 'S') {
+  } else if (cmd == 's' || cmd == 'S') {
     systemOn = !systemOn;
     if (!systemOn) forceFullSpeed = false;
-    digitalWrite(STATUS_LED_PIN, systemOn ? HIGH : LOW);
+    digitalWrite(STATUS_LED_PIN, HIGH ? systemOn : LOW);
     sendLogEvent(systemOn ? "[CMD] System ON" : "[CMD] System OFF");
   }
 }
 
-// ---------------------------------------------------------------
-// Read a value from a flat JSON object, e.g. jsonField(s, "value") on {"value":40}
-// ---------------------------------------------------------------
 String jsonField(const String& json, const String& key) {
   String needle = "\"" + key + "\":";
   int start = json.indexOf(needle);
   if (start < 0) return "";
-
   start += needle.length();
   while (start < (int)json.length() && json[start] == ' ') start++;
   if (start >= (int)json.length()) return "";
 
-  if (json[start] == '"') {                       // quoted string value
+  if (json[start] == '"') {
     int end = json.indexOf('"', start + 1);
     return end < 0 ? "" : json.substring(start + 1, end);
   }
-
-  int end = start;                                // number or bare word
+  int end = start;
   while (end < (int)json.length() && json[end] != ',' && json[end] != '}') end++;
   String v = json.substring(start, end);
   v.trim();
   return v;
 }
 
-// ---------------------------------------------------------------
-// Commands from the React dashboard.
-// JSON, e.g. {"command":"SET_SPEED","value":40}, or plain text, e.g. "TARE".
-// ---------------------------------------------------------------
 void handleWebSocketMessage(String payload) {
   payload.trim();
 
@@ -223,11 +240,13 @@ void handleWebSocketMessage(String payload) {
   else if (cmd == "TARE") {
     tareBoth();
   }
-  else if (cmd == "CAL_TOP") {
-    handleCommand('1');
+  else if (cmd == "CALIBRATE_TOP") {
+    float weight = jsonField(payload, "weight").toFloat();
+    calibrateDeck(true, weight);
   }
-  else if (cmd == "CAL_BOT") {
-    handleCommand('2');
+  else if (cmd == "CALIBRATE_BOT") {
+    float weight = jsonField(payload, "weight").toFloat();
+    calibrateDeck(false, weight);
   }
   else if (cmd == "SET_MODE") {
     String mode = jsonField(payload, "mode");
@@ -260,94 +279,101 @@ void handleWebSocketMessage(String payload) {
   }
 }
 
-// ---------------------------------------------------------------
-// WebSocket event callback
-// ---------------------------------------------------------------
 void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
-      Serial.printf("[WS] Client #%u disconnected.\n", num);
-      if (webSocket.connectedClients() == 0) {
-        wsClientConnected = false;
-      }
+      if (webSocket.connectedClients() == 0) wsClientConnected = false;
       break;
-
     case WStype_CONNECTED: {
-      IPAddress ip = webSocket.remoteIP(num);
-      Serial.printf("[WS] Client #%u connected from %d.%d.%d.%d\n",
-                    num, ip[0], ip[1], ip[2], ip[3]);
       wsClientConnected = true;
       sendLogEvent("[ESP32] Linked to BeanTrack Web Dashboard");
       break;
     }
-
     case WStype_TEXT: {
       String message = String((char*)payload, length);
       handleWebSocketMessage(message);
       break;
     }
-
-    default:
-      break;
+    default: break;
   }
 }
 
-// ---------------------------------------------------------------
-// Runs after Wi-Fi is connected: mDNS name and WebSocket server
-// ---------------------------------------------------------------
 void startNetworkServices() {
   if (MDNS.begin(MDNS_HOSTNAME)) {
     Serial.println("[mDNS] Responder started: ws://beantrack.local:81");
   }
   webSocket.begin();
   webSocket.onEvent(onWebSocketEvent);
-  Serial.print("[WiFi] Connected to ");
-  Serial.print(WiFi.SSID());
-  Serial.print(", IP ");
-  Serial.println(WiFi.localIP());
   Serial.println("[WS] WebSocket server started on port 81");
+
+  // --- OTA SETUP ---
+  ArduinoOTA.setHostname(MDNS_HOSTNAME); 
+  ArduinoOTA.setPassword("beantrack123");
+
+  ArduinoOTA.onStart([]() {
+    isUpdating = true; 
+    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+    Serial.println("[OTA] Start updating " + type);
+    
+    // Safety: Turn off motor
+    systemOn = false;
+    ledcWrite(PWM_CHANNEL, 0);
+
+    // CRITICAL FIX: Kill the WebSocket server to free up TCP ports and memory
+    webSocket.disconnect(); 
+    webSocket.close();      
+    wsClientConnected = false;
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n[OTA] Update Complete. Rebooting...");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    isUpdating = false; // <-- RESUME MAIN LOOP IF IT FAILS
+    Serial.printf("[OTA] Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+  Serial.println("[OTA] OTA Ready. IP: " + WiFi.localIP().toString());
 }
 
-// ---------------------------------------------------------------
-// Setup
-// ---------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
-
-  // Reset reason: 9 = brownout. Shows whether a reboot was a power dip.
-  Serial.printf("[BOOT] Reset reason: %d\n", (int)esp_reset_reason());
-
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
 
-  // Motor PWM on GPIO 25 (core v2 API)
   ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
   ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
   ledcWrite(PWM_CHANNEL, 0);
 
-  // Load cells
   topScaleLeft.begin(LEFT_DT, LEFT_SCK);
   bottomScaleRight.begin(RIGHT_DT, RIGHT_SCK);
   pinMode(LEFT_DT, INPUT_PULLUP);
   pinMode(RIGHT_DT, INPUT_PULLUP);
 
-  topScaleLeft.set_scale(calFactorTopLeft);
-  bottomScaleRight.set_scale(calFactorBottomRight);
+  loadSettings(); 
 
-  // Wi-Fi: use the saved network, or open the BeanTrack-Setup network if none works
   if (WifiSettings::connectStored()) {
     startNetworkServices();
   } else {
     WifiSettings::startSetupAP();
   }
 
-  // Restore the last zero instead of re-taring on every boot.
-  // A tare happens only when the user presses Tare.
-  loadZeros();
-  sendLogEvent("[BOOT] Restored last zero. Press Tare if the decks were changed.");
+  sendLogEvent("[BOOT] System Ready. Calibration loaded from NVM.");
 }
+
 
 // ---------------------------------------------------------------
 // Main loop
@@ -360,6 +386,18 @@ void loop() {
     delay(5);
     return;
   }
+
+  // --- OTA UPDATE IN PROGRESS ---
+  // If an update is running, bypass all WebSocket, Motor, and Sensor logic.
+  // Dedicate the entire CPU and Wi-Fi stack to downloading the file.
+  if (isUpdating) {
+    ArduinoOTA.handle();
+    delay(1); // Yield to the Wi-Fi task
+    return; 
+  }
+  // ------------------------------
+
+  ArduinoOTA.handle(); 
 
   // 1. WebSocket clients and USB Serial commands
   webSocket.loop();
@@ -413,13 +451,11 @@ void loop() {
       motorSpeed = map(smoothedPotValue, 0, 4095, 0, 255);
     }
 
-    // Friction kickstart: minimum pulse to prevent stall at low speeds
     if (motorSpeed > 0 && motorSpeed < 50 && !forceFullSpeed) {
       motorSpeed = max(motorSpeed, 90);
     }
   }
 
-  // Soft start: ramp up gradually to limit inrush; drop immediately on stop
   if (rampSpeed < motorSpeed) rampSpeed = min(motorSpeed, rampSpeed + RAMP_STEP_PER_LOOP);
   else                        rampSpeed = motorSpeed;
   ledcWrite(PWM_CHANNEL, rampSpeed);

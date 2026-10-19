@@ -1,44 +1,50 @@
 <?php
-require 'db.php';
+require __DIR__ . '/db.php';
 
-$data = json_decode(file_get_contents("php://input"), true);
-$batchCode = trim((string) ($data['batch_code'] ?? ''));
-$bins = $data['bins'] ?? null;
-$allowedBins = ['large', 'medium', 'debris'];
-
-if ($batchCode === '' || !is_array($bins)) {
-    http_response_code(400);
-    echo json_encode(["success" => false, "error" => "Invalid accuracy data."]);
+function fail($code, $msg) {
+    http_response_code($code);
+    echo json_encode(["success" => false, "error" => $msg]);
     exit();
 }
 
-$conn->begin_transaction();
-$statement = $conn->prepare("INSERT INTO accuracy_checks (batch_code, bin_name, beans_checked, correctly_sorted) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE beans_checked = VALUES(beans_checked), correctly_sorted = VALUES(correctly_sorted)");
-$valid = true;
+$in = json_decode(file_get_contents('php://input'), true);
+if (!is_array($in)) fail(400, 'Invalid JSON.');
 
-foreach ($allowedBins as $bin) {
-    $checked = (float) ($bins[$bin]['checked'] ?? -1);
-    $correct = (float) ($bins[$bin]['correct'] ?? -1);
+$batchCode = trim((string)($in['batch_code'] ?? ''));
+$bins      = $in['bins'] ?? null;
+
+if ($batchCode === '' || !is_array($bins)) fail(400, 'Invalid accuracy data.');
+
+// Only the two weighed decks have accuracy checks
+$rows = [];
+foreach (['large', 'medium'] as $bin) {
+    $checked = isset($bins[$bin]['checked']) ? (float)$bins[$bin]['checked'] : -1;
+    $correct = isset($bins[$bin]['correct']) ? (float)$bins[$bin]['correct'] : -1;
     if ($checked < 0 || $correct < 0 || $correct > $checked) {
-        $valid = false;
-        break;
+        fail(400, "Invalid values for $bin.");
     }
-    $statement->bind_param('ssdd', $batchCode, $bin, $checked, $correct);
-    if (!$statement->execute()) {
-        $valid = false;
-        break;
-    }
+    $rows[] = [$bin, $checked, $correct];
 }
 
-$statement->close();
-if ($valid) {
+$conn->begin_transaction();
+try {
+    $stmt = $conn->prepare("INSERT INTO accuracy_checks (batch_code, bin_name, beans_checked, correctly_sorted)
+                            VALUES (?, ?, ?, ?)
+                            ON DUPLICATE KEY UPDATE
+                              beans_checked = VALUES(beans_checked),
+                              correctly_sorted = VALUES(correctly_sorted)");
+    foreach ($rows as [$bin, $checked, $correct]) {
+        $stmt->bind_param("ssdd", $batchCode, $bin, $checked, $correct);
+        $stmt->execute();
+    }
+    $stmt->close();
     $conn->commit();
     echo json_encode(["success" => true]);
-} else {
+} catch (mysqli_sql_exception $e) {
     $conn->rollback();
-    http_response_code(400);
-    echo json_encode(["success" => false, "error" => "Invalid accuracy values."]);
+    if ($e->getCode() === 1452) fail(404, 'Batch not found.');
+    fail(500, 'Could not save accuracy.');
+} catch (Throwable $e) {
+    $conn->rollback();
+    fail(500, 'Could not save accuracy.');
 }
-
-$conn->close();
-?>

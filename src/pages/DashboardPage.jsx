@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Gauge, Timer, Play, Square, RotateCcw, Scale, Layers, Boxes, Loader2 } from "lucide-react";
+import { Activity, Timer, Play, Square, RotateCcw, Scale, Layers, Boxes, Loader2 } from "lucide-react";
 import DashboardSetup from "../components/DashboardSetup";
+import WifiSetupPanel from "../components/WifiSetupPanel";
 import { C, mono, display } from "../appTokens";
-import { fmtTime } from "../appUtils";
+import { fmtTime, sortingLoss } from "../appUtils";
 import { Panel, Metric, Button, IconChip, SectionLabel } from "../components/ui";
 
 const RING_COLOR = { Idle: C.lineLit, Processing: C.amber, Completed: C.green, Error: C.red };
@@ -10,9 +11,9 @@ const STATUS_DOT = { Idle: C.textFaint, Processing: C.amber, Completed: C.green,
 
 const MIN_CHANGE_G = 0.3;      // a deck counts as "active" only when it gains at least this much
 const ACTIVE_HOLD_MS = 1500;   // keep the active state this long after the last gain
-const DONE_SHOW_MS = 2000;     // how long "zeroed" confirmation stays visible
+const DONE_SHOW_MS = 2000;     // how long the "zeroed" confirmation stays visible
 
-// Circular gauge: the arc fills with the percentage of the input that has been sorted
+// Circular gauge: the arc fills with the recovered share of the input
 function ProgressRing({ percent, color }) {
   return (
     <div
@@ -30,7 +31,7 @@ function ProgressRing({ percent, color }) {
         style={{ width: 118, height: 118, margin: 16, borderRadius: "50%", background: C.panel }}
       >
         <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1 }}>{Math.round(percent)}%</div>
-        <div style={{ fontSize: 11, color: C.textFaint, marginTop: 4 }}>of input</div>
+        <div style={{ fontSize: 11, color: C.textFaint, marginTop: 4 }}>recovered</div>
       </div>
     </div>
   );
@@ -67,7 +68,7 @@ function ActiveChip({ active }) {
   );
 }
 
-// One live deck reading: large weight, bar against the input target, active state
+// One live deck reading: weight, bar against the input target, active state
 function DeckCard({ title, icon, grams, inputTarget, active, source }) {
   const pct = inputTarget ? Math.min((grams / inputTarget) * 100, 100) : 0;
   return (
@@ -121,18 +122,20 @@ export default function DashboardPage({
   onStop,
   onReset,
   onTare,
+  onSaveWifi,
+  wifiPending,
+  currentNetwork,
   connected,
   fault,
   taring,
   tareDoneAt,
 }) {
-  // Two physical decks. Top = large grade. Bottom = medium + fine (matches the firmware label).
+  // Two physical decks: top = large grade, bottom = medium grade
   const top = live.large;
-  const bottom = live.medium + live.debris;
-  const total = top + bottom;
-  const percent = machine.inputTarget ? Math.min((total / machine.inputTarget) * 100, 100) : 0;
-  const largeShare = total > 0 ? (top / total) * 100 : null;
-  const remaining = Math.max(0, machine.inputTarget - total);
+  const bottom = live.medium;
+  const { recovered, lossG, lossPct } = sortingLoss(machine.inputTarget, top, bottom);
+
+  const percent = machine.inputTarget ? Math.min((recovered / machine.inputTarget) * 100, 100) : 0;
   const isRunning = machine.status === "Processing";
   const statusColor = RING_COLOR[machine.status] || C.lineLit;
   const sourceLabel = connected ? "Live · ESP32" : "Simulated";
@@ -214,10 +217,10 @@ export default function DashboardPage({
 
               <div className="flex-1" style={{ minWidth: 260 }}>
                 <div style={{ color: C.textFaint, fontSize: 10.5, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase" }}>
-                  Total recorded
+                  Recovered weight
                 </div>
                 <div style={{ ...mono, fontSize: 40, fontWeight: 800, lineHeight: 1.1 }}>
-                  {total.toFixed(0)}
+                  {recovered.toFixed(0)}
                   <span style={{ fontSize: 18, color: C.textDim, marginLeft: 4 }}>g</span>
                 </div>
                 <div style={{ fontSize: 12, color: C.textFaint }}>of {machine.inputTarget} g input</div>
@@ -265,7 +268,7 @@ export default function DashboardPage({
                 source={sourceLabel}
               />
               <DeckCard
-                title="Bottom deck · Medium / Fine"
+                title="Bottom deck · Medium"
                 icon={Boxes}
                 grams={bottom}
                 inputTarget={machine.inputTarget}
@@ -275,17 +278,18 @@ export default function DashboardPage({
             </div>
           </div>
 
+          {/* summary tiles */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
             <Panel title={<span className="flex items-center gap-2"><IconChip icon={Timer} />Processing time</span>}>
               <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.2 }}>{fmtTime(machine.processingTime)}</div>
             </Panel>
-            <Panel title={<span className="flex items-center gap-2"><IconChip icon={Gauge} />Large share</span>}>
-              <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.2 }}>
-                {largeShare === null ? "—" : `${Math.round(largeShare)}%`}
-              </div>
+            <Panel title={<span className="flex items-center gap-2"><IconChip icon={Activity} />Recovered</span>}>
+              <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.2 }}>{recovered.toFixed(0)} g</div>
+              <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>Large + Medium</div>
             </Panel>
-            <Panel title={<span className="flex items-center gap-2"><IconChip icon={Scale} />Input remaining</span>}>
-              <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.2 }}>{remaining.toFixed(0)} g</div>
+            <Panel title={<span className="flex items-center gap-2"><IconChip icon={Scale} />Loss</span>}>
+              <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.2 }}>{lossG.toFixed(0)} g</div>
+              <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>{lossPct.toFixed(1)}% of input</div>
             </Panel>
           </div>
 
@@ -323,6 +327,13 @@ export default function DashboardPage({
             setSpeed={setSpeed}
             setInputTarget={setInputTarget}
             vertical
+          />
+          <WifiSetupPanel
+            connected={connected}
+            isRunning={isRunning}
+            currentNetwork={currentNetwork}
+            pending={wifiPending}
+            onSave={onSaveWifi}
           />
         </div>
       </div>

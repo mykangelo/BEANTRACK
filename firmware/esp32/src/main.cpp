@@ -3,41 +3,40 @@
 #include <ESPmDNS.h>
 #include <WebSocketsServer.h>
 #include "HX711.h"
+#include "wifi_settings.h"
 
-// --- Wi-Fi Credentials (Update with your local Wi-Fi network) ---
-const char* WIFI_SSID     = "DITO_D521A_2.4";
-const char* WIFI_PASSWORD = "AE56755B";
-const char* MDNS_HOSTNAME = "beantrack"; // Accessible at ws://beantrack.local:81
+// --- mDNS name (the Wi-Fi name and password are stored on the ESP32, not here) ---
+const char* MDNS_HOSTNAME = "beantrack";   // reachable at ws://beantrack.local:81
 
-// --- WebSocket Server on Port 81 ---
+// --- WebSocket server on port 81 ---
 WebSocketsServer webSocket = WebSocketsServer(81);
 bool wsClientConnected = false;
 
-// --- Pin Definitions ---
-const int LEFT_DT   = 32; // Top Sieve Deck
+// --- Pin definitions ---
+const int LEFT_DT   = 32;   // Top (large) deck
 const int LEFT_SCK  = 33;
-const int RIGHT_DT  = 26; // Bottom Deck
+const int RIGHT_DT  = 26;   // Bottom (medium) deck
 const int RIGHT_SCK = 27;
 
 const int BUTTON_PIN     = 14;
 const int MOTOR_PIN      = 25;
 const int POT_PIN        = 34;
-const int STATUS_LED_PIN = 4;  // ON/OFF indicator LED
+const int STATUS_LED_PIN = 4;
 
 // --- ESP32 LEDC PWM (Arduino core v2 API, pinned in platformio.ini) ---
 const int PWM_CHANNEL = 0;
-const int PWM_FREQ    = 5000;  // 5 kHz
-const int PWM_RES     = 8;     // 8-bit (0 - 255)
+const int PWM_FREQ    = 5000;
+const int PWM_RES     = 8;
 
 HX711 topScaleLeft;
 HX711 bottomScaleRight;
 
-// --- Calibration Factors ---
+// --- Calibration factors ---
 float calFactorTopLeft     = 116.3;
 float calFactorBottomRight = 116.3;
 const float KNOWN_WEIGHT_G = 165.0;
 
-// --- EMA Filtering & Deadband (Scales) ---
+// --- EMA filtering and deadband ---
 const float FILTER_ALPHA  = 0.15;
 const float ZERO_DEADBAND = 2.5;
 
@@ -49,28 +48,28 @@ long rawZeroBottom = 0;
 long deltaTop      = 0;
 long deltaBottom   = 0;
 
-// --- System & Operating State ---
+// --- System and operating state ---
 bool systemOn = false;
 bool forceFullSpeed = false;
-bool webSpeedOverride = false;        // True when the web slider sets speed
+bool webSpeedOverride = false;        // true when the web slider sets speed
 int  webTargetSpeedPercent = 40;
 String operatingMode = "Automatic";   // "Automatic" or "Manual"
 
 unsigned long lastPrintTime = 0;
 
-// --- Button Debounce ---
+// --- Button debounce ---
 bool lastButtonState = HIGH;
 bool debouncedButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50;
 
-// --- Potentiometer Filtering ---
+// --- Potentiometer filtering ---
 int smoothedPotValue = 0;
 int lastPotPercent = 0;
-const float POT_ALPHA = 0.2;          // Smooths motor voltage ripple on the ADC
+const float POT_ALPHA = 0.2;
 
 // ---------------------------------------------------------------
-// Logging: writes to USB Serial and, if a dashboard is connected, to the web UI
+// Logging: USB Serial and, if a dashboard is connected, the web UI
 // ---------------------------------------------------------------
 void sendLogEvent(String msg) {
   Serial.println(msg);
@@ -142,8 +141,6 @@ void handleCommand(char cmd) {
 
 // ---------------------------------------------------------------
 // Read a value from a flat JSON object, e.g. jsonField(s, "value") on {"value":40}
-// Returns the string contents for quoted values, the raw text for numbers/words,
-// or "" if the key is missing.
 // ---------------------------------------------------------------
 String jsonField(const String& json, const String& key) {
   String needle = "\"" + key + "\":";
@@ -167,19 +164,17 @@ String jsonField(const String& json, const String& key) {
 }
 
 // ---------------------------------------------------------------
-// Parse commands from the React dashboard.
-// Accepts JSON, e.g. {"command":"SET_SPEED","value":40}, or plain text, e.g. "TARE".
+// Commands from the React dashboard.
+// JSON, e.g. {"command":"SET_SPEED","value":40}, or plain text, e.g. "TARE".
 // ---------------------------------------------------------------
 void handleWebSocketMessage(String payload) {
   payload.trim();
 
-  // Single-character commands ('t', '1', '2', 'f', 's')
   if (payload.length() == 1) {
     handleCommand(payload[0]);
     return;
   }
 
-  // Get the command name: from JSON "command" field, or the whole text for plain commands
   String cmd = payload;
   if (payload.startsWith("{")) {
     cmd = jsonField(payload, "command");
@@ -219,6 +214,17 @@ void handleWebSocketMessage(String payload) {
     forceFullSpeed = false;
     sendLogEvent("[WEB] Vibration speed set to " + String(webTargetSpeedPercent) + "%");
   }
+  else if (cmd == "SET_WIFI") {
+    String ssid = jsonField(payload, "ssid");
+    String pass = jsonField(payload, "password");
+    if (!WifiSettings::validateAndSave(ssid, pass)) {
+      sendLogEvent("[WIFI] Not saved: check the network name and password");
+      return;
+    }
+    sendLogEvent("[WIFI] Saved " + ssid + ". Restarting to join it.");
+    delay(800);      // let the log line reach the dashboard before restarting
+    ESP.restart();
+  }
 }
 
 // ---------------------------------------------------------------
@@ -243,7 +249,6 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
     }
 
     case WStype_TEXT: {
-      // Use the length from the library: the payload is not guaranteed to be null-terminated
       String message = String((char*)payload, length);
       handleWebSocketMessage(message);
       break;
@@ -255,38 +260,19 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
 }
 
 // ---------------------------------------------------------------
-// Wi-Fi + mDNS + WebSocket server
+// Runs after Wi-Fi is connected: mDNS name and WebSocket server
 // ---------------------------------------------------------------
-void setupWiFi() {
-  Serial.println();
-  Serial.print("[WiFi] Connecting to ");
-  Serial.println(WIFI_SSID);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+void startNetworkServices() {
+  if (MDNS.begin(MDNS_HOSTNAME)) {
+    Serial.println("[mDNS] Responder started: ws://beantrack.local:81");
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Connected!");
-    Serial.print("[WiFi] IP Address: ");
-    Serial.println(WiFi.localIP());
-
-    if (MDNS.begin(MDNS_HOSTNAME)) {
-      Serial.println("[mDNS] Responder started: ws://beantrack.local:81");
-    }
-
-    webSocket.begin();
-    webSocket.onEvent(onWebSocketEvent);
-    Serial.println("[WS] WebSocket server started on port 81");
-  } else {
-    Serial.println("\n[WiFi] Connection failed! Continuing in offline/Serial mode.");
-  }
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+  Serial.print("[WiFi] Connected to ");
+  Serial.print(WiFi.SSID());
+  Serial.print(", IP ");
+  Serial.println(WiFi.localIP());
+  Serial.println("[WS] WebSocket server started on port 81");
 }
 
 // ---------------------------------------------------------------
@@ -314,8 +300,12 @@ void setup() {
   topScaleLeft.set_scale(calFactorTopLeft);
   bottomScaleRight.set_scale(calFactorBottomRight);
 
-  // Wi-Fi and WebSocket server
-  setupWiFi();
+  // Wi-Fi: use the saved network, or open the BeanTrack-Setup network if none works
+  if (WifiSettings::connectStored()) {
+    startNetworkServices();
+  } else {
+    WifiSettings::startSetupAP();
+  }
 
   // Zero scales on startup
   tareBoth();
@@ -325,6 +315,14 @@ void setup() {
 // Main loop
 // ---------------------------------------------------------------
 void loop() {
+  // Setup mode: only the setup web page runs, and the motor stays off
+  if (WifiSettings::setupMode) {
+    WifiSettings::handleClient();
+    ledcWrite(PWM_CHANNEL, 0);
+    delay(5);
+    return;
+  }
+
   // 1. WebSocket clients and USB Serial commands
   webSocket.loop();
 
@@ -357,7 +355,6 @@ void loop() {
   smoothedPotValue = (int)((POT_ALPHA * rawPot) + ((1.0 - POT_ALPHA) * smoothedPotValue));
   int currentPotPercent = map(smoothedPotValue, 0, 4095, 0, 100);
 
-  // Physical knob moved more than 3%: hand control back to the potentiometer
   if (abs(currentPotPercent - lastPotPercent) > 3) {
     webSpeedOverride = false;
     lastPotPercent = currentPotPercent;
@@ -401,7 +398,7 @@ void loop() {
     filteredBottomGrams = (FILTER_ALPHA * gramsBottom) + ((1.0 - FILTER_ALPHA) * filteredBottomGrams);
   }
 
-  // 5. Telemetry every 300 ms to the dashboard and USB Serial
+  // 5. Telemetry every 300 ms
   if (millis() - lastPrintTime >= 300) {
     lastPrintTime = millis();
 
@@ -426,6 +423,7 @@ void loop() {
       jsonTelemetry += "\"systemOn\":" + String(systemOn ? "true" : "false") + ",";
       jsonTelemetry += "\"status\":\"" + String(systemOn ? "Sorting" : "Idle") + "\",";
       jsonTelemetry += "\"mode\":\"" + operatingMode + "\",";
+      jsonTelemetry += "\"wifi\":\"" + WiFi.SSID() + "\",";
       jsonTelemetry += "\"vibration_speed\":" + String(speedPercent) + ",";
       jsonTelemetry += "\"active_bin\":\"" + activeBin + "\",";
       jsonTelemetry += "\"top_grams\":" + String(displayTop, 1) + ",";

@@ -1,60 +1,229 @@
-import { C, mono } from "../appTokens";
-import { Panel } from "../components/ui";
+import { Activity, Layers, Boxes, Scale, ArrowRight } from "lucide-react";
+import { C, mono, display } from "../appTokens";
+import { sortingLoss } from "../appUtils";
+import { Panel, IconChip, SectionLabel } from "../components/ui";
 
-const CATS = ["large", "medium", "debris"];
-const CAT_LABEL = { large: "Large", medium: "Medium", debris: "Fine / debris" };
-const CAT_COLOR = { large: "#E3BE58", medium: "#B98A3E", debris: "#231710" };
-const BIN_INFO = { large: "Bin 1 · >5 mm", medium: "Bin 2 · 4–5 mm", debris: "Bin 3 · <4 mm" };
-const STATUS_COLOR = { Idle: "#9C8558", Processing: "#C99A2E", Completed: "#5C3B1E", Error: "#1C130B" };
+const STATUS_DOT = { Idle: C.textFaint, Processing: C.amber, Completed: C.green, Error: C.red };
 
-function PageHeader({ title, purpose }) {
+const STATUS_TEXT = {
+  Idle: "No batch running. Values stay at zero until a batch starts.",
+  Processing: "Batch in progress. Values are still changing.",
+  Completed: "Batch complete. These are the final values.",
+  Error: "Run stopped by an error. Values may be incomplete.",
+};
+
+const ACTIVE_HOLD_MS = 1500;
+
+// Small status pill used in the page header and the deck cards
+function StatusChip({ label, color }) {
+  return (
+    <span
+      style={{
+        ...mono,
+        fontSize: 10.5,
+        fontWeight: 700,
+        letterSpacing: "0.04em",
+        padding: "3px 9px",
+        borderRadius: 999,
+        border: `1px solid ${color}`,
+        background: `${color}22`,
+        color: C.text,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+// One deck reading, same look as the dashboard deck cards
+function DeckCard({ title, icon, grams, inputTarget, info }) {
+  const pct = inputTarget ? Math.min((grams / inputTarget) * 100, 100) : 0;
+  return (
+    <Panel
+      title={
+        <span className="flex items-center gap-2">
+          <IconChip icon={icon} />
+          {title}
+        </span>
+      }
+      right={<StatusChip label={info} color={C.lineLit} />}
+    >
+      <div className="flex items-end gap-2">
+        <span style={{ ...mono, fontSize: 40, fontWeight: 800, lineHeight: 1 }}>{grams.toFixed(1)}</span>
+        <span style={{ fontSize: 18, color: C.textDim, marginBottom: 4 }}>g</span>
+      </div>
+
+      <div className="h-2 rounded-full overflow-hidden mt-4" style={{ background: C.glassLine }}>
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: C.lineLit,
+            borderRadius: 999,
+            transition: "width 0.3s ease",
+          }}
+        />
+      </div>
+
+      <div className="flex justify-between mt-3" style={{ fontSize: 11.5, color: C.textFaint }}>
+        <span>{pct.toFixed(0)}% of {inputTarget} g input</span>
+        <span>Live · ESP32</span>
+      </div>
+    </Panel>
+  );
+}
+
+// One metric cell in the summary row
+function Figure({ label, value, unit, color, sub }) {
   return (
     <div>
-      <div style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 32, fontWeight: 700, lineHeight: 1.15 }}>{title}</div>
-      <div style={{ fontSize: 13.5, color: C.textDim, marginTop: 3 }}>{purpose}</div>
+      <div
+        style={{
+          color: C.textFaint,
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: "0.07em",
+          textTransform: "uppercase",
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ ...mono, fontSize: 30, fontWeight: 800, lineHeight: 1.1, color: color || C.text }}>
+        {value}
+        {unit && <span style={{ fontSize: 16, color: C.textDim, marginLeft: 4 }}>{unit}</span>}
+      </div>
+      {sub && <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>{sub}</div>}
     </div>
   );
 }
 
-function BeanTag({ bean }) {
-  const color = bean === "Arabica" ? C.arabica : C.robusta;
-  return <span className="inline-flex items-center gap-1.5 px-2 py-0.5" style={{ border: `1px solid ${color}66`, color, borderRadius: 999, ...mono, fontSize: 11 }}>{bean}</span>;
+// Horizontal bar showing how the input splits into top, bottom, and loss
+function SplitBar({ topPct, bottomPct, lossPct }) {
+  const segments = [
+    { label: "Top · Large", pct: topPct, color: C.amber },
+    { label: "Bottom · Medium", pct: bottomPct, color: C.lineLit },
+    { label: "Loss", pct: lossPct, color: C.red },
+  ];
+  return (
+    <div>
+      <div className="flex h-3 rounded-full overflow-hidden" style={{ background: C.glassLine }}>
+        {segments.map((s) => (
+          <div
+            key={s.label}
+            title={`${s.label}: ${s.pct.toFixed(1)}%`}
+            style={{ width: `${s.pct}%`, background: s.color, transition: "width 0.3s ease" }}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-5 mt-3" style={{ fontSize: 12, color: C.textDim }}>
+        {segments.map((s) => (
+          <span key={s.label} className="inline-flex items-center gap-2">
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: "inline-block" }} />
+            {s.label}
+            <span style={{ ...mono, color: C.text, fontWeight: 700 }}>{s.pct.toFixed(1)}%</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export default function SortingWeightMonitor({ machine, live }) {
-  const sorted = live.large + live.medium;
-  const total = sorted + live.debris;
   const inputW = machine.inputTarget;
-  const yieldPct = inputW ? (sorted / inputW) * 100 : 0;
-  const finePct = inputW ? (live.debris / inputW) * 100 : 0;
-  const rowStyle = { borderBottom: `1px solid ${C.glassLine}` };
-  const valueStyle = { ...mono, fontSize: 13 };
+  const { recovered, lossG, lossPct } = sortingLoss(inputW, live.large, live.medium);
+
+  const topPct = inputW ? Math.min((live.large / inputW) * 100, 100) : 0;
+  const bottomPct = inputW ? Math.min((live.medium / inputW) * 100, 100 - topPct) : 0;
+  const lossBarPct = Math.max(0, 100 - topPct - bottomPct);
+
+  const isProcessing = machine.status === "Processing";
+  const statusColor = STATUS_DOT[machine.status] || C.textFaint;
 
   return (
-    <div className="flex flex-col gap-5 max-w-3xl">
-      <PageHeader title="Sorting & weight" purpose="Weight recorded in each bin for the current batch, and the results worked out from it." />
-      <div className="flex items-center gap-2" style={{ fontSize: 12.5, color: C.textDim }}>
-        <span style={{ width: 8, height: 8, borderRadius: "50%", background: STATUS_COLOR[machine.status], display: "inline-block" }} />
-        {{ Processing: "Batch in progress. Values are still changing.", Completed: "Batch complete. These are the final values.", Error: "Run stopped by an error. Values are incomplete.", Idle: "No batch running. Values stay at zero until a batch starts." }[machine.status]}
+    <div className="flex flex-col gap-5 w-full max-w-6xl mx-auto">
+      {/* header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div style={{ ...display, fontSize: 32, fontWeight: 700, letterSpacing: "-0.015em", lineHeight: 1.15 }}>
+            Sorting & weight
+          </div>
+          <div style={{ fontSize: 13.5, color: C.textDim, marginTop: 3 }}>
+            Weight recovered from each deck for the current batch, compared with the input.
+          </div>
+        </div>
+        <StatusChip label={machine.status.toUpperCase()} color={statusColor} />
       </div>
-      <div style={{ fontSize: 11, color: C.textFaint, ...mono }}>LOAD CELL → HX711 → ESP32 → WEB APP → DATABASE</div>
 
-      <Panel title="Weight per bin" right={<BeanTag bean={machine.beanType} />}>
-        <table className="w-full" style={{ borderCollapse: "collapse" }}>
-          <thead><tr style={rowStyle}><th className="text-left py-2" style={{ fontSize: 11, color: C.textFaint, fontWeight: 500 }}>BIN</th><th className="text-right py-2" style={{ fontSize: 11, color: C.textFaint, fontWeight: 500 }}>WEIGHT</th></tr></thead>
-          <tbody>
-            {CATS.map((c) => <>
-              <tr key={c} style={rowStyle}><td className="py-2.5" style={{ fontSize: 13 }}><span style={{ width: 7, height: 7, background: CAT_COLOR[c], display: "inline-block", marginRight: 8 }} />{CAT_LABEL[c]} <span style={{ ...mono, fontSize: 10.5, color: C.textFaint }}>{BIN_INFO[c]}</span></td><td className="text-right" style={valueStyle}>{Math.round(live[c])} g</td></tr>
-              {c === "medium" && <tr key="sorted" style={rowStyle}><td className="py-2" style={{ fontSize: 12, color: C.textDim, paddingLeft: 15 }}>Sorted weight (Bin 1 + Bin 2)</td><td className="text-right" style={{ ...valueStyle, color: C.green }}>{Math.round(sorted)} g</td></tr>}
-            </>)}
-            <tr style={rowStyle}><td className="py-2.5" style={{ fontSize: 13, fontWeight: 600 }}>Total recorded</td><td className="text-right" style={{ ...valueStyle, fontWeight: 700 }}>{Math.round(total)} g</td></tr>
-            <tr><td className="py-2.5" style={{ fontSize: 13 }}>Input weight</td><td className="text-right" style={valueStyle}>{inputW} g</td></tr>
-          </tbody>
-        </table>
+      {/* status line */}
+      <div className="flex items-center gap-2" style={{ fontSize: 12.5, color: C.textDim }}>
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: statusColor,
+            display: "inline-block",
+          }}
+        />
+        {STATUS_TEXT[machine.status]}
+      </div>
+
+      {/* deck cards */}
+      <div>
+        <SectionLabel>LIVE DECK WEIGHTS</SectionLabel>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mt-2">
+          <DeckCard
+            title="Top deck · Large"
+            icon={Layers}
+            grams={live.large}
+            inputTarget={inputW}
+            info="Bin 1 · >5 mm"
+          />
+          <DeckCard
+            title="Bottom deck · Medium"
+            icon={Boxes}
+            grams={live.medium}
+            inputTarget={inputW}
+            info="Bin 2 · 4–5 mm"
+          />
+        </div>
+      </div>
+
+      {/* recovery summary */}
+      <Panel
+        title={
+          <span className="flex items-center gap-2">
+            <IconChip icon={Activity} />
+            {isProcessing ? "Recovery so far" : "Recovery summary"}
+          </span>
+        }
+        right={<StatusChip label={`${inputW} g INPUT`} color={C.lineLit} />}
+      >
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-5">
+          <Figure label="Input" value={inputW} unit="g" sub={machine.beanType} />
+          <Figure label="Recovered" value={recovered.toFixed(0)} unit="g" color={C.green} sub="Top + Bottom" />
+          <Figure label="Loss" value={lossG.toFixed(0)} unit="g" color={C.red} sub="Input − Recovered" />
+          <Figure label="Loss" value={`${lossPct.toFixed(1)}`} unit="%" color={C.red} sub="of input" />
+        </div>
+
+        <div className="mt-6 pt-5" style={{ borderTop: `1px solid ${C.glassLine}` }}>
+          <SplitBar topPct={topPct} bottomPct={bottomPct} lossPct={lossBarPct} />
+        </div>
       </Panel>
-      <div className="grid grid-cols-2 gap-4">
-        <Panel title={machine.status === "Processing" ? "Yield (so far)" : "Yield"}><div style={{ ...mono, fontSize: 26, fontWeight: 700, color: C.green }}>{yieldPct.toFixed(1)}%</div><div style={{ fontSize: 11, color: C.textFaint, marginTop: 4 }}>(Bin 1 + Bin 2) ÷ input × 100</div></Panel>
-        <Panel title={machine.status === "Processing" ? "Fine / debris % (so far)" : "Fine / debris %"}><div style={{ ...mono, fontSize: 26, fontWeight: 700, color: C.red }}>{finePct.toFixed(1)}%</div><div style={{ fontSize: 11, color: C.textFaint, marginTop: 4 }}>Bin 3 ÷ input × 100</div></Panel>
+
+      {/* formula, for the thesis reader */}
+      <div className="flex items-center gap-3 flex-wrap" style={{ fontSize: 12, color: C.textFaint }}>
+        <span style={{ ...mono }}>LOAD CELL</span>
+        <ArrowRight size={12} />
+        <span style={{ ...mono }}>HX711</span>
+        <ArrowRight size={12} />
+        <span style={{ ...mono }}>ESP32</span>
+        <ArrowRight size={12} />
+        <span style={{ ...mono }}>WEB APP</span>
+        <ArrowRight size={12} />
+        <span style={{ ...mono }}>DATABASE</span>
+        <span style={{ marginLeft: "auto" }}>Loss = (Input − Recovered) ÷ Input × 100</span>
       </div>
     </div>
   );

@@ -1,34 +1,23 @@
 import { useState, useEffect, useRef } from "react";
-import { Wifi, WifiOff, Database } from "lucide-react";
+import { Wifi, WifiOff, Database, Package } from "lucide-react";
 import "./App.css";
 
 import DashboardPage from "./pages/DashboardPage";
 import SortingWeightMonitor from "./pages/SortingWeightMonitor";
-import AnalyticsPage from "./pages/AnalyticsPage";
+import InventoryPage from "./pages/InventoryPage";
 import BatchHistoryPage from "./pages/BatchHistoryPage";
 import { AlertBanner, FAULTS } from "./components/AlertBanner";
 import { C, mono, sans, display } from "./appTokens";
 import {
-  API_BASE,
   ESP32_WS_URL,
   NAV,
-  CATS,
   SEED_BATCHES,
   RECOMMENDED_SPEED,
   PROCESS_TICKS,
   SIM_SHARE,
   SIM_CATEGORIES,
 } from "./appConstants";
-import {
-  clamp,
-  nextBatchId,
-  mapDbBatch,
-  inventoryFromRows,
-  accuracyFromRows,
-  normalizeBins,
-  getJson,
-  postJson,
-} from "./appUtils";
+import { clamp, nextBatchId, mapDbBatch, normalizeBins, getJson, postJson } from "./appUtils";
 
 const SHELL_BACKGROUND =
   "radial-gradient(1000px 700px at 90% -15%, rgba(244,214,150,0.55), transparent 70%), " +
@@ -36,27 +25,35 @@ const SHELL_BACKGROUND =
   "linear-gradient(160deg, #F9F3E4 0%, #F3E8CF 45%, #EADBBA 78%, #E2CFA6 100%)";
 
 const EMPTY_LIVE = { large: 0, medium: 0, debris: 0 };
-const TARE_TIMEOUT_MS = 6000; // give up waiting for [TARE DONE] after this long
-const WS_STALE_MS = 2500; // firmware sends telemetry every 300 ms; silence means the ESP dropped
+const TARE_TIMEOUT_MS = 6000;   // give up waiting for [TARE DONE] after this long
+const WS_STALE_MS = 2500;       // firmware sends telemetry every 300 ms; silence means the ESP dropped
 const WS_CONNECT_TIMEOUT_MS = 5000;
 const WS_WATCH_MS = 1000;
 
-const DEFAULT_INVENTORY = {
-  Arabica: { large: 5.2, medium: 7.4, debris: 2.9 },
-  Robusta: { large: 3.5, medium: 4.8, debris: 1.6 },
+// Shape returned by get_inventory.php, before the first load
+const EMPTY_INVENTORY = {
+  stock: { Arabica: 0, Robusta: 0 },
+  totals: {
+    Arabica: { received: 0, sorted: 0 },
+    Robusta: { received: 0, sorted: 0 },
+  },
+  movements: [],
 };
 
 export default function CoffeeSorterApp() {
   /* ---------- state ---------- */
   const [view, setView] = useState("dashboard");
+  const [network, setNetwork] = useState("");          // Wi-Fi name reported by the ESP32
+  const [wifiPending, setWifiPending] = useState(false); // true while the ESP32 restarts after a Wi-Fi change
   const [connected, setConnected] = useState(false);
   const [hardwareConnected, setHardwareConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [dbDown, setDbDown] = useState(false);
   const [fault, setFault] = useState(null);
-  const [accuracy, setAccuracy] = useState({});
+  const [notice, setNotice] = useState(null);           // e.g. start blocked by stock
+  const [saveError, setSaveError] = useState(null);     // batch the server refused to save
   const [batches, setBatches] = useState(SEED_BATCHES);
-  const [inventory, setInventory] = useState(DEFAULT_INVENTORY);
+  const [inventory, setInventory] = useState(EMPTY_INVENTORY);
   const [historySel, setHistorySel] = useState(null);
   const [live, setLive] = useState(EMPTY_LIVE);
   const [taring, setTaring] = useState(false);
@@ -83,40 +80,41 @@ export default function CoffeeSorterApp() {
   const connectHardwareRef = useRef(() => {});
 
   /* ---------- database ---------- */
-  // Also used by the "Retry" button in the database banner
+  // Also used by the "Retry" button and after every successful write
   function loadFromDb() {
     getJson("get_batches.php")
       .then((rows) => {
         if (!Array.isArray(rows)) throw new Error("bad response");
-        if (rows.length > 0) {
-          const mapped = rows.map(mapDbBatch);
-          setBatches(mapped);
-          setMachine((m) => ({ ...m, batchId: nextBatchId(mapped) }));
-        }
+        const mapped = rows.map(mapDbBatch);
+        setBatches(mapped);
+        setMachine((m) => ({ ...m, batchId: nextBatchId(mapped) }));
         setDbDown(false);
       })
       .catch(() => setDbDown(true));
 
     getJson("get_inventory.php")
-      .then((rows) => {
-        if (!Array.isArray(rows)) throw new Error("bad response");
-        if (rows.length > 0) setInventory(inventoryFromRows(rows));
+      .then((data) => {
+        if (!data || !data.stock) throw new Error("bad response");
+        setInventory({
+          stock: data.stock,
+          totals: data.totals ?? EMPTY_INVENTORY.totals,
+          movements: data.movements ?? [],
+        });
       })
       .catch(() => setDbDown(true));
-
-    // accuracy table is optional until it's created, so failures are silent
-    getJson("get_accuracy.php")
-      .then((rows) => {
-        if (Array.isArray(rows)) setAccuracy(accuracyFromRows(rows));
-      })
-      .catch(() => {});
   }
 
-  function saveAccuracy(batchId, bins) {
-    setAccuracy((a) => ({ ...a, [batchId]: bins }));
-    return postJson("save_accuracy.php", { batch_code: batchId, bins })
-      .then((res) => !!res.success)
-      .catch(() => false);
+  // Record a receipt. The database rejects anything other than a receipt.
+  function addMovement(payload) {
+    return postJson("add_movement.php", payload)
+      .then((res) => {
+        if (res.success) loadFromDb();
+        return res;
+      })
+      .catch(() => {
+        setDbDown(true);
+        return { success: false, error: "Database unreachable." };
+      });
   }
 
   /* ---------- ESP32 connection ---------- */
@@ -127,6 +125,8 @@ export default function CoffeeSorterApp() {
   }
 
   function applyTelemetry(message) {
+    if (typeof message.wifi === "string") setNetwork(message.wifi);
+
     const top = Math.max(0, Number(message.top_grams) || 0);
     const bottom = Math.max(0, Number(message.bottom_grams) || 0);
     setLive({ large: top, medium: bottom, debris: 0 });
@@ -144,12 +144,15 @@ export default function CoffeeSorterApp() {
     }));
   }
 
-  // Firmware log lines: [TARE] starts a tare, [TARE DONE] finishes it
+  // Firmware log lines: [TARE] starts a tare, [TARE DONE] finishes it,
+  // and a rejected Wi-Fi change clears the waiting state
   function handleDeviceLog(text = "") {
     if (text.startsWith("[TARE]")) {
       setTaring(true);
     } else if (text.startsWith("[TARE DONE]")) {
       finishTare();
+    } else if (text.startsWith("[WIFI] Not saved")) {
+      setWifiPending(false);
     }
   }
 
@@ -166,6 +169,18 @@ export default function CoffeeSorterApp() {
     clearTimeout(tareTimerRef.current);
     tareTimerRef.current = setTimeout(() => setTaring(false), TARE_TIMEOUT_MS);
   }
+
+  // Sends the new network to the ESP32, which saves it and restarts
+  function saveWifi(ssid, password) {
+    const sent = sendHardwareCommand({ command: "SET_WIFI", ssid, password });
+    if (sent) setWifiPending(true);
+    return sent;
+  }
+
+  // Once the ESP32 is reachable again, the Wi-Fi change is finished
+  useEffect(() => {
+    if (connected) setWifiPending(false);
+  }, [connected]);
 
   function markHardwareOffline(wasLive) {
     setHardwareConnected(false);
@@ -222,7 +237,8 @@ export default function CoffeeSorterApp() {
 
   connectHardwareRef.current = connectHardware;
 
-  // open the hardware socket on mount, then watch for a silent ESP (onclose often never fires)
+  // Open the socket on mount, load the database, and watch for a silent ESP
+  // (onclose often never fires when the board loses power)
   useEffect(() => {
     loadFromDb();
     connectHardwareRef.current();
@@ -284,48 +300,34 @@ export default function CoffeeSorterApp() {
   }, [hardwareConnected, machine.inputTarget, machine.status]);
 
   /* ---------- save a finished run ---------- */
-  // Runs when a run ends (Completed in simulation, or Idle after hardware finishes)
+  // Runs when a run ends (Completed in simulation, or Idle after hardware finishes).
+  // The server writes the batch and its stock movements in one transaction.
   useEffect(() => {
     if (!runActiveRef.current || !["Completed", "Idle"].includes(machine.status)) return;
     runActiveRef.current = false;
     runStartedAtRef.current = null;
 
     const weights = normalizeBins(live, machine.inputTarget);
-    const record = {
-      id: machine.batchId,
-      date: new Date().toISOString().slice(0, 16).replace("T", " "),
-      beanType: machine.beanType,
-      mode: machine.mode,
-      vibrationSpeed: machine.vibrationSpeed,
-      inputWeight: machine.inputTarget,
-      weights,
-      processingTime: machine.processingTime,
-    };
-
-    setBatches((prev) => [record, ...prev]);
-    setInventory((inv) => {
-      const next = structuredClone(inv);
-      CATS.forEach((c) => {
-        next[machine.beanType][c] += weights[c] / 1000;
-      });
-      return next;
-    });
 
     postJson("save_batch.php", {
-      batch_code: record.id,
-      bean_type: record.beanType,
-      mode: record.mode,
-      vibration_speed: record.vibrationSpeed,
-      input_weight: record.inputWeight,
+      batch_code: machine.batchId,
+      bean_type: machine.beanType,
+      mode: machine.mode,
+      vibration_speed: machine.vibrationSpeed,
+      input_weight: machine.inputTarget,
       large_weight: weights.large,
       medium_weight: weights.medium,
       small_weight: 0,
       fine_weight: weights.debris,
-      processing_time: record.processingTime,
+      processing_time: machine.processingTime,
     })
       .then((res) => {
-        if (!res.success) setDbDown(true);
-        else loadFromDb();
+        if (res.success) {
+          setSaveError(null);
+          loadFromDb(); // refreshes batches, stock, and the movement log
+        } else {
+          setSaveError(res.error || "Batch was not saved.");
+        }
       })
       .catch(() => setDbDown(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,6 +353,18 @@ export default function CoffeeSorterApp() {
 
   function handleStart() {
     if (machine.status === "Processing" || fault) return;
+
+    // Block a run when green bean stock can't cover the input (skipped if the database is down)
+    const onHand = inventory.stock?.[machine.beanType] ?? 0;
+    if (!dbDown && onHand < machine.inputTarget) {
+      setNotice(
+        `Not enough ${machine.beanType} green beans: ${Math.round(onHand)} g on hand, ` +
+          `${machine.inputTarget} g needed. Record a receipt on the Inventory page first.`
+      );
+      return;
+    }
+    setNotice(null);
+
     runActiveRef.current = true;
     runStartedAtRef.current = Date.now();
     sendHardwareCommand({ command: "START" }); // returns false offline, so the simulator runs instead
@@ -416,6 +430,9 @@ export default function CoffeeSorterApp() {
         onStop={handleStop}
         onReset={handleReset}
         onTare={requestTare}
+        onSaveWifi={saveWifi}
+        wifiPending={wifiPending}
+        currentNetwork={network}
         connected={connected}
         fault={fault}
         taring={taring}
@@ -423,15 +440,7 @@ export default function CoffeeSorterApp() {
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
-    analytics: (
-      <AnalyticsPage
-        batches={batches}
-        inventory={inventory}
-        dbDown={dbDown}
-        accuracy={accuracy}
-        onSaveAccuracy={saveAccuracy}
-      />
-    ),
+    inventory: <InventoryPage inventory={inventory} onAddMovement={addMovement} />,
     history: <BatchHistoryPage batches={batches} sel={historySel} setSel={setHistorySel} />,
   };
 
@@ -534,7 +543,7 @@ export default function CoffeeSorterApp() {
 
       {/* main */}
       <main className="flex-1 flex flex-col min-w-0 gap-3" style={{ position: "relative" }}>
-        {(!connected || faultInfo || dbDown) && (
+        {(!connected || faultInfo || dbDown || notice || saveError) && (
           <div className="flex flex-col gap-3 shrink-0">
             {faultInfo && (
               <AlertBanner
@@ -554,6 +563,26 @@ export default function CoffeeSorterApp() {
                 title="Database unreachable"
                 message="Start Apache and MySQL in XAMPP. Batches that finish while it's down won't be saved."
                 action={{ label: "Retry", onClick: loadFromDb }}
+              />
+            )}
+            {notice && (
+              <AlertBanner
+                severity="warning"
+                icon={Package}
+                code="W-STOCK"
+                title="Start blocked"
+                message={notice}
+                action={{ label: "Dismiss", onClick: () => setNotice(null) }}
+              />
+            )}
+            {saveError && (
+              <AlertBanner
+                severity="warning"
+                icon={Database}
+                code="W-SAVE"
+                title="Batch not saved"
+                message={saveError}
+                action={{ label: "Dismiss", onClick: () => setSaveError(null) }}
               />
             )}
           </div>

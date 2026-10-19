@@ -1,17 +1,16 @@
-import { LayoutGrid, Scale, BarChart3, History } from "lucide-react";
+import { LayoutGrid, Scale, Package, History } from "lucide-react";
 
-export const ESP32_WS_URL = "ws://192.168.8.158:81";
-export const API_BASE = "/beantrack-api";
+export const API_BASE = import.meta.env.VITE_API_BASE || "/beantrack-api";
+export const ESP32_WS_URL = import.meta.env.VITE_ESP32_WS_URL || "ws://beantrack.local:81";
 
 export const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
   { id: "monitor", label: "Sorting & weight", icon: Scale },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
+  { id: "inventory", label: "Inventory", icon: Package },
   { id: "history", label: "Batch history", icon: History },
 ];
 
-// Three bins, each with its own load cell (per the paper)
-//   Bin 1 = largest grade (>5 mm), Bin 2 = medium grade (4-5 mm), Bin 3 = fine/debris (<4 mm)
+// Two weighed decks: Large (top) and Medium (bottom). Fine/debris has no load cell.
 export const CATS = ["large", "medium", "debris"];
 export const CAT_LABEL = { large: "Large", medium: "Medium", debris: "Fine / debris" };
 export const CAT_COLOR = { large: "#E3BE58", medium: "#B98A3E", debris: "#231710" };
@@ -20,10 +19,11 @@ export const BIN_INFO = { large: "Bin 1 · >5 mm", medium: "Bin 2 · 4–5 mm", 
 export const RECOMMENDED_SPEED = 40; // recommended vibration speed (%)
 export const PROCESS_TICKS = 60;     // simulated run length (ticks)
 
-// Share of the input each bin ends with in the simulator (adds up to 1)
+// Share of the input each deck ends with in the simulator
 export const SIM_SHARE = { large: 0.41, medium: 0.39, debris: 0.2 };
 export const SIM_CATEGORIES = ["Large", "Medium", "Fine / debris"];
 
+// Sample rows shown only before the database has loaded
 export const SEED_BATCHES = [
   { id: "B001", sample: true, date: "2026-09-13 08:02", beanType: "Arabica", mode: "Automatic", vibrationSpeed: 62, inputWeight: 1000,
     weights: { large: 370, medium: 400, debris: 230 }, processingTime: 12 * 60 },

@@ -51,7 +51,25 @@ bool connectStored() {
   return WiFi.status() == WL_CONNECTED;
 }
 
-// Setup page served by the ESP32 itself, reachable at http://192.168.4.1
+// ---------------------------------------------------------------
+// CORS: lets the dashboard (localhost:5173) call the setup API
+// ---------------------------------------------------------------
+void addCorsHeaders() {
+  setupServer.sendHeader("Access-Control-Allow-Origin", "*");
+  setupServer.sendHeader("Access-Control-Allow-Private-Network", "true");
+  setupServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  setupServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+// Browser preflight requests
+void handleOptions() {
+  addCorsHeaders();
+  setupServer.send(204);
+}
+
+// ---------------------------------------------------------------
+// Manual setup page, reachable at http://192.168.4.1
+// ---------------------------------------------------------------
 void handleRoot() {
   String page =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -81,7 +99,55 @@ void handleSave() {
   ESP.restart();
 }
 
-// Opens the BeanTrack-Setup network and the setup page
+// ---------------------------------------------------------------
+// Setup API used by the dashboard modal
+// ---------------------------------------------------------------
+
+// GET /api/status: confirms this is a BeanTrack board in setup mode
+void handleStatus() {
+  addCorsHeaders();
+  setupServer.send(200, "application/json", "{\"setup\":true,\"device\":\"BeanTrack\"}");
+}
+
+// Escape a string for a JSON value
+String jsonEscape(String s) {
+  s.replace("\\", "\\\\");
+  s.replace("\"", "\\\"");
+  return s;
+}
+
+// GET /api/scan: nearby networks, as a JSON array of names
+void handleScan() {
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;   // skip hidden networks
+    if (json.length() > 1) json += ",";
+    json += "\"" + jsonEscape(ssid) + "\"";
+  }
+  json += "]";
+  addCorsHeaders();
+  setupServer.send(200, "application/json", json);
+}
+
+// POST /api/save: form-encoded body (ssid, password). Form encoding avoids a preflight.
+void handleApiSave() {
+  String ssid = setupServer.arg("ssid");
+  String pass = setupServer.arg("password");
+  addCorsHeaders();
+
+  if (!validateAndSave(ssid, pass)) {
+    setupServer.send(400, "application/json",
+      "{\"ok\":false,\"error\":\"Check the network name and password\"}");
+    return;
+  }
+  setupServer.send(200, "application/json", "{\"ok\":true}");
+  delay(1000);
+  ESP.restart();
+}
+
+// Opens the BeanTrack-Setup network and registers all setup routes
 void startSetupAP() {
   setupMode = true;
   WiFi.disconnect(true);
@@ -90,9 +156,22 @@ void startSetupAP() {
 
   setupServer.on("/", HTTP_GET, handleRoot);
   setupServer.on("/save", HTTP_POST, handleSave);
+  setupServer.on("/api/status", HTTP_GET, handleStatus);
+  setupServer.on("/api/status", HTTP_OPTIONS, handleOptions);
+  setupServer.on("/api/scan", HTTP_GET, handleScan);
+  setupServer.on("/api/scan", HTTP_OPTIONS, handleOptions);
+  setupServer.on("/api/save", HTTP_POST, handleApiSave);
+  setupServer.on("/api/save", HTTP_OPTIONS, handleOptions);
   setupServer.begin();
 
   Serial.println("[SETUP] Join Wi-Fi 'BeanTrack-Setup' (password beantrack123), then open http://192.168.4.1");
+}
+
+// Erase the saved Wi-Fi name and password. The next boot opens BeanTrack-Setup.
+void clearSaved() {
+  wifiPrefs.begin("wifi", false);
+  wifiPrefs.clear();
+  wifiPrefs.end();
 }
 
 void handleClient() { setupServer.handleClient(); }

@@ -9,7 +9,7 @@ import SortingWeightMonitor from "./pages/SortingWeightMonitor";
 import InventoryPage from "./pages/InventoryPage";
 import BatchHistoryPage from "./pages/BatchHistoryPage";
 import { AlertBanner, FAULTS } from "./components/AlertBanner";
-import { C, mono, sans, display } from "./appTokens";
+import { C, sans, display } from "./appTokens";
 import {
   ESP32_WS_URL,
   NAV,
@@ -30,7 +30,10 @@ const SHELL_BACKGROUND =
   "linear-gradient(160deg, #F9F3E4 0%, #F3E8CF 45%, #EADBBA 78%, #E2CFA6 100%)";
 
 const EMPTY_LIVE = { large: 0, medium: 0, debris: 0 };
-const TARE_TIMEOUT_MS = 6000;
+// Both jobs are non-blocking on the ESP32, but keep a generous margin so the
+// firmware's own result log wins the race.
+const TARE_TIMEOUT_MS = 20000;
+const CALIBRATE_TIMEOUT_MS = 20000;
 const WS_STALE_MS = 2500;
 const WS_CONNECT_TIMEOUT_MS = 5000;
 const WS_WATCH_MS = 1000;
@@ -38,16 +41,18 @@ const WS_WATCH_MS = 1000;
 const EMPTY_INVENTORY = {
   stock: { Arabica: 0, Robusta: 0 },
   totals: {
-    Arabica: { received: 0, sorted: 0 },
-    Robusta: { received: 0, sorted: 0 },
+    Arabica: { received: 0, sorted: 0, adjusted: 0 },
+    Robusta: { received: 0, sorted: 0, adjusted: 0 },
   },
+  stock_batches: [],
+  active_stock_batch_id: null,
+  adjustments: [],
   movements: [],
 };
 
 export default function CoffeeSorterApp() {
   const [view, setView] = useState("dashboard");
   const [network, setNetwork] = useState("");
-  const [wifiPending, setWifiPending] = useState(false);
   const [connected, setConnected] = useState(false);
   const [hardwareConnected, setHardwareConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -60,6 +65,7 @@ export default function CoffeeSorterApp() {
   const [calibNotice, setCalibNotice] = useState(null);
 
   const [batches, setBatches] = useState(SEED_BATCHES);
+  const [accuracy, setAccuracy] = useState({});
   const [inventory, setInventory] = useState(EMPTY_INVENTORY);
   const [historySel, setHistorySel] = useState(null);
   const [live, setLive] = useState(EMPTY_LIVE);
@@ -91,6 +97,9 @@ export default function CoffeeSorterApp() {
   const seenWeightFlowRef = useRef(false);
   const liveTotalRef = useRef(0);
   const inputTargetRef = useRef(1000);
+  const prevSystemOnRef = useRef(false);
+  const stopReasonRef = useRef(null);
+  const sourceRef = useRef("hardware");
 
   function loadFromDb() {
     getJson("get_batches.php")
@@ -109,14 +118,56 @@ export default function CoffeeSorterApp() {
         setInventory({
           stock: data.stock,
           totals: data.totals ?? EMPTY_INVENTORY.totals,
+          stock_batches: data.stock_batches ?? [],
+          active_stock_batch_id: data.active_stock_batch_id ?? null,
+          adjustments: data.adjustments ?? [],
           movements: data.movements ?? [],
         });
       })
       .catch(() => setDbDown(true));
+
+    loadAccuracy();
   }
 
-  function addMovement(payload) {
-    return postJson("add_movement.php", payload)
+  // rows from get_accuracy.php -> { B001: { large: {checked, correct}, medium: {...} } }
+  function loadAccuracy() {
+    getJson("get_accuracy.php")
+      .then((rows) => {
+        if (!Array.isArray(rows)) throw new Error("bad response");
+        const byBatch = {};
+        for (const row of rows) {
+          if (!byBatch[row.batch_code]) byBatch[row.batch_code] = {};
+          byBatch[row.batch_code][row.bin_name] = {
+            checked: Number(row.beans_checked) || 0,
+            correct: Number(row.correctly_sorted) || 0,
+          };
+        }
+        setAccuracy(byBatch);
+      })
+      .catch(() => setDbDown(true));
+  }
+
+  function saveAccuracy(batchCode, bins) {
+    return postJson("save_accuracy.php", { batch_code: batchCode, bins })
+      .then((res) => {
+        if (!res.success) {
+          setSaveError(res.error || "Accuracy check was not saved.");
+          return false;
+        }
+        setSaveError(null);
+        setAccuracy((prev) => ({ ...prev, [batchCode]: bins }));
+        return true;
+      })
+      .catch(() => {
+        setDbDown(true);
+        return false;
+      });
+  }
+
+  // All inventory mutations reload the ledger after they succeed so the cards,
+  // layer table, and movement logs always agree.
+  function inventoryAction(path, payload) {
+    return postJson(path, payload)
       .then((res) => {
         if (res.success) loadFromDb();
         return res;
@@ -125,6 +176,22 @@ export default function CoffeeSorterApp() {
         setDbDown(true);
         return { success: false, error: "Database unreachable." };
       });
+  }
+
+  function addMovement(payload) {
+    return inventoryAction("add_movement.php", payload);
+  }
+
+  function createStockBatch(payload) {
+    return inventoryAction("create_stock_batch.php", payload);
+  }
+
+  function adjustStock(payload) {
+    return inventoryAction("adjust_stock.php", payload);
+  }
+
+  function resetStock(payload) {
+    return inventoryAction("reset_stock.php", payload);
   }
 
   function sendHardwareCommand(command) {
@@ -136,21 +203,41 @@ export default function CoffeeSorterApp() {
   function applyTelemetry(message) {
     if (typeof message.wifi === "string") setNetwork(message.wifi);
 
+    const deviceOn = message.systemOn === true;
+
+    // A run can also be started from the ESP32 button. Arm the recorder on the
+    // rising edge so those batches are saved too.
+    if (deviceOn && !prevSystemOnRef.current && !runActiveRef.current) {
+      runActiveRef.current = true;
+      runStartedAtRef.current = Date.now();
+      stopReasonRef.current = null;
+      sourceRef.current = "hardware";
+      resetWeightWatch();
+    }
+    prevSystemOnRef.current = deviceOn;
+
     const top = Math.max(0, Number(message.top_grams) || 0);
     const bottom = Math.max(0, Number(message.bottom_grams) || 0);
     setLive({ large: top, medium: bottom, debris: 0 });
-    setMachine((m) => ({
-      ...m,
-      status: message.systemOn ? "Processing" : m.status === "Processing" ? "Idle" : m.status,
-      mode: message.mode === "Manual" ? "Manual" : "Automatic",
-      vibrationSpeed: clamp(Number(message.vibration_speed) || 0, 0, 100),
-      sortingCategory: message.active_bin && message.active_bin !== "None" ? message.active_bin : "—",
-      liveWeight: top + bottom,
-      processingTime:
-        message.systemOn && runStartedAtRef.current
-          ? Math.floor((Date.now() - runStartedAtRef.current) / 1000)
-          : m.processingTime,
-    }));
+    setMachine((m) => {
+      // Ignore a stale "on" frame that arrives after the user pressed Stop.
+      let status = m.status;
+      if (deviceOn && runActiveRef.current) status = "Processing";
+      else if (!deviceOn && m.status === "Processing") status = "Idle";
+
+      return {
+        ...m,
+        status,
+        mode: message.mode === "Manual" ? "Manual" : "Automatic",
+        vibrationSpeed: clamp(Number(message.vibration_speed) || 0, 0, 100),
+        sortingCategory: message.active_bin && message.active_bin !== "None" ? message.active_bin : "—",
+        liveWeight: top + bottom,
+        processingTime:
+          deviceOn && runActiveRef.current && runStartedAtRef.current
+            ? Math.floor((Date.now() - runStartedAtRef.current) / 1000)
+            : m.processingTime,
+      };
+    });
   }
 
   // Catch the Success/Error messages from ESP32
@@ -161,8 +248,10 @@ export default function CoffeeSorterApp() {
       setTaring(true);
     } else if (text.startsWith("[TARE DONE]")) {
       finishTare();
-    } else if (text.startsWith("[WIFI] Not saved")) {
-      setWifiPending(false);
+    } else if (text.startsWith("[FAULT]")) {
+      const key = text.slice(7).trim().toLowerCase().split(/[^a-z]/)[0];
+      stopReasonRef.current = "fault";
+      setFault(FAULTS[key] ? key : "loadcell");
     } else if (text.includes("Success! New factor:")) {
       setTaring(false);
       clearTimeout(tareTimerRef.current);
@@ -211,30 +300,26 @@ export default function CoffeeSorterApp() {
         title: "Timeout", 
         message: "The ESP32 did not respond to the calibration command. Check your connections." 
       });
-    }, 10000); 
+    }, CALIBRATE_TIMEOUT_MS);
   }
 
   function resetWifi() {
     return sendHardwareCommand({ command: "RESET_WIFI" });
   }
 
-  function saveWifi(ssid, password) {
-    const sent = sendHardwareCommand({ command: "SET_WIFI", ssid, password });
-    if (sent) setWifiPending(true);
-    return sent;
-  }
-
-  useEffect(() => {
-    if (connected) setWifiPending(false);
-  }, [connected]);
-
   function markHardwareOffline(wasLive) {
     setHardwareConnected(false);
     setConnected(false);
     setReconnecting(false);
+    // Allow the recorder to re-arm if the board is still running when it
+    // reconnects. Batches that finish while offline cannot be saved.
+    prevSystemOnRef.current = false;
     if (!wasLive) return;
     setTaring(false);
     clearTimeout(tareTimerRef.current);
+    runActiveRef.current = false;
+    runStartedAtRef.current = null;
+    stopReasonRef.current = null;
     setMachine((m) => (m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m));
   }
 
@@ -352,7 +437,8 @@ export default function CoffeeSorterApp() {
     seenWeightFlowRef.current = false;
   }
 
-  function handleStop() {
+  function handleStop(reason) {
+    stopReasonRef.current = typeof reason === "string" ? reason : "manual";
     sendHardwareCommand({ command: "STOP" });
     setMachine((m) => ({ ...m, status: m.status === "Processing" ? "Idle" : m.status }));
   }
@@ -378,12 +464,12 @@ export default function CoffeeSorterApp() {
       }
 
       if (total >= inputTargetRef.current) {
-        handleStop();
+        handleStop("auto");
         return;
       }
 
       if (seenWeightFlowRef.current && now - lastWeightChangeAtRef.current >= WEIGHT_IDLE_MS) {
-        handleStop();
+        handleStop("auto");
       }
     };
 
@@ -400,11 +486,18 @@ export default function CoffeeSorterApp() {
     runStartedAtRef.current = null;
 
     const weights = normalizeBins(live, machine.inputTarget);
+    const source = sourceRef.current;
+    const status =
+      stopReasonRef.current === "manual" ? "Partial" :
+      stopReasonRef.current === "fault" ? "Error" : "Completed";
+    stopReasonRef.current = null;
 
     postJson("save_batch.php", {
       batch_code: machine.batchId,
       bean_type: machine.beanType,
       mode: machine.mode,
+      source,
+      status,
       vibration_speed: machine.vibrationSpeed,
       input_weight: machine.inputTarget,
       large_weight: weights.large,
@@ -428,7 +521,9 @@ export default function CoffeeSorterApp() {
   function resetRun() {
     runActiveRef.current = false;
     runStartedAtRef.current = null;
+    stopReasonRef.current = null;
     resetWeightWatch();
+    sendHardwareCommand({ command: "STOP" });
     setLive(EMPTY_LIVE);
     setMachine((m) => ({ ...m, status: "Idle", processingTime: 0, liveWeight: 0, sortingCategory: "—" }));
   }
@@ -458,6 +553,8 @@ export default function CoffeeSorterApp() {
 
     runActiveRef.current = true;
     runStartedAtRef.current = Date.now();
+    stopReasonRef.current = null;
+    sourceRef.current = hardwareConnected ? "hardware" : "simulated";
     resetWeightWatch();
     sendHardwareCommand({ command: "START", input_weight: machine.inputTarget });
     setLive(EMPTY_LIVE);
@@ -466,8 +563,10 @@ export default function CoffeeSorterApp() {
 
   function handleReset() {
     clearInterval(tickRef.current);
+    sendHardwareCommand({ command: "STOP" });
     runActiveRef.current = false;
     runStartedAtRef.current = null;
+    stopReasonRef.current = null;
     resetWeightWatch();
     setFault(null);
     setLive(EMPTY_LIVE);
@@ -531,8 +630,16 @@ export default function CoffeeSorterApp() {
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
-    inventory: <InventoryPage inventory={inventory} onAddMovement={addMovement} />,
-    history: <BatchHistoryPage batches={batches} sel={historySel} setSel={setHistorySel} />,
+    inventory: (
+      <InventoryPage
+        inventory={inventory}
+        onAddMovement={addMovement}
+        onCreateStockBatch={createStockBatch}
+        onAdjustStock={adjustStock}
+        onResetStock={resetStock}
+      />
+    ),
+    history: <BatchHistoryPage batches={batches} sel={historySel} setSel={setHistorySel} accuracy={accuracy} onSaveAccuracy={saveAccuracy} />,
   };
 
   return (

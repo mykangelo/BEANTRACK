@@ -1,7 +1,16 @@
 import { LayoutGrid, Scale, Package, History } from "lucide-react";
 
-export const API_BASE = import.meta.env.VITE_API_BASE || "/beantrack-api";
-export const ESP32_WS_URL = import.meta.env.VITE_ESP32_WS_URL || "ws://beantrack.local:81";
+// `import.meta.env` is replaced by Vite at build time; the fallback keeps these
+// modules importable from plain Node (used by the unit tests).
+const env = import.meta.env ?? {};
+
+export const API_BASE = env.VITE_API_BASE || "/beantrack-api";
+export const ESP32_WS_URL = env.VITE_ESP32_WS_URL || "ws://beantrack.local:81";
+
+// Optional shared secret. Set BEANTRACK_API_TOKEN on the API and VITE_API_TOKEN
+// on the frontend to enable it. This is a speed bump for a trusted LAN, not a
+// replacement for real authentication.
+export const API_TOKEN = env.VITE_API_TOKEN || "";
 
 export const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
@@ -10,17 +19,11 @@ export const NAV = [
   { id: "history", label: "Batch history", icon: History },
 ];
 
-// Two weighed decks: Large (top) and Medium (bottom). Fine/debris has no load cell.
-export const CATS = ["large", "medium", "debris"];
-export const CAT_LABEL = { large: "Large", medium: "Medium", debris: "Fine / debris" };
-export const CAT_COLOR = { large: "#E3BE58", medium: "#B98A3E", debris: "#231710" };
-export const BIN_INFO = { large: "Bin 1 · >5 mm", medium: "Bin 2 · 4–5 mm", debris: "Bin 3 · <4 mm" };
-
 export const RECOMMENDED_SPEED = 40; // recommended vibration speed (%)
 export const PROCESS_TICKS = 60;     // simulated run length (ticks)
 
 // Auto-stop a run when recovered weight is unchanged (stuck mesh / debris).
-// Logic only — not shown in the UI.
+// The ESP32 runs the same check; keep these values in sync with main.cpp.
 export const WEIGHT_IDLE_MS = 10000; // no change for this long → batch complete
 export const WEIGHT_CHANGE_G = 5;    // ignore load-cell jitter below this
 export const WEIGHT_FLOW_G = 20;     // require this much gain before idle-stop

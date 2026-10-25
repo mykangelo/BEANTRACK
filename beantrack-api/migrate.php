@@ -1,5 +1,7 @@
 <?php
-// Usage: env BEANTRACK_DB_PASS='...' /opt/lampp/bin/php migrate.php
+// Usage: /opt/lampp/bin/php migrate.php
+// Credentials come from config.local.php (see config.local.example.php) or, if
+// no local file exists, from BEANTRACK_DB_* environment variables.
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit(); }
 
 require __DIR__ . '/db.php';

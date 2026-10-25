@@ -1,4 +1,4 @@
-import { Activity, Layers, Boxes, Scale, ArrowRight } from "lucide-react";
+import { Activity, Layers, Boxes, ArrowRight } from "lucide-react";
 import { C, mono, display } from "../appTokens";
 import { sortingLoss } from "../appUtils";
 import { Panel, IconChip, SectionLabel } from "../components/ui";
@@ -11,8 +11,6 @@ const STATUS_TEXT = {
   Completed: "Batch complete. These are the final values.",
   Error: "Run stopped by an error. Values may be incomplete.",
 };
-
-const ACTIVE_HOLD_MS = 1500;
 
 // Small status pill used in the page header and the deck cards
 function StatusChip({ label, color }) {

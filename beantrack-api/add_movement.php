@@ -1,5 +1,6 @@
 <?php
 require __DIR__ . '/db.php';
+require __DIR__ . '/stock_helpers.php';
 
 function fail($code, $msg, $detail = null) {
     if ($detail !== null) error_log("add_movement: $detail");
@@ -22,17 +23,31 @@ if ($type !== 'receipt') {
 }
 if ($grams <= 0) fail(400, 'Weight must be above 0 g.');
 
+$conn->begin_transaction();
 try {
-    $stmt = $conn->prepare(
-        "INSERT INTO inventory_movements (bean_type, movement_type, grams, note)
-         VALUES (?, 'receipt', ?, ?)"
+    lock_bean($conn, $bean);
+    lock_stock_batches($conn);
+    $stockBatchId = active_stock_batch_id($conn);
+    if ($stockBatchId === null) {
+        throw new RuntimeException('No active stock batch. Create a new stock batch first.');
+    }
+
+    $id = insert_stock_movement(
+        $conn, $bean, $stockBatchId, 'receipt', $grams, null, null, $note === '' ? null : $note
     );
-    $stmt->bind_param("sds", $bean, $grams, $note);
-    $stmt->execute();
-    $id = $conn->insert_id;
-    $stmt->close();
+    $label = stock_batch_label($conn, $stockBatchId);
+
+    $conn->commit();
+    echo json_encode([
+        "success" => true,
+        "id" => $id,
+        "stock_batch_id" => $stockBatchId,
+        "stock_batch_label" => $label,
+    ]);
+} catch (RuntimeException $e) {
+    $conn->rollback();
+    fail(409, $e->getMessage());
 } catch (Throwable $e) {
+    $conn->rollback();
     fail(500, 'Could not save receipt.', $e->getMessage());
 }
-
-echo json_encode(["success" => true, "id" => $id]);

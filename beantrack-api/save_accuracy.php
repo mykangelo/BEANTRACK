@@ -26,6 +26,16 @@ foreach (['large', 'medium'] as $bin) {
     $rows[] = [$bin, $checked, $correct];
 }
 
+// Check explicitly instead of relying on a foreign key: legacy databases that
+// were upgraded by 0003_batch_audit.sql may not have one on this table.
+$exists = $conn->prepare("SELECT 1 FROM batches WHERE batch_code = ?");
+$exists->bind_param("s", $batchCode);
+$exists->execute();
+$exists->store_result();
+$found = $exists->num_rows > 0;
+$exists->close();
+if (!$found) fail(404, 'Batch not found.');
+
 $conn->begin_transaction();
 try {
     $stmt = $conn->prepare("INSERT INTO accuracy_checks (batch_code, bin_name, beans_checked, correctly_sorted)

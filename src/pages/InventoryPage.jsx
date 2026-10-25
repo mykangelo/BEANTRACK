@@ -34,27 +34,32 @@ const inputStyle = {
   background: C.glassStrong,
   border: `1px solid ${C.glassLine}`,
   borderRadius: 10,
-  padding: "8px 10px",
-  fontSize: 13,
+  padding: "10px 12px",
+  fontSize: 13.5,
   color: C.text,
   width: "100%",
 };
 
 const labelStyle = {
-  fontSize: 11,
+  fontSize: 11.5,
   color: C.textFaint,
   fontWeight: 600,
   letterSpacing: "0.05em",
   textTransform: "uppercase",
-  marginBottom: 4,
+  marginBottom: 6,
   display: "block",
 };
 
 const hintStyle = {
-  fontSize: 11.5,
+  fontSize: 12,
   color: C.textFaint,
-  lineHeight: 1.5,
+  lineHeight: 1.6,
 };
+
+const panelBodyStyle = { padding: "16px 24px 24px" };
+const tableStyle = { borderCollapse: "collapse", width: "100%", fontSize: 13 };
+const tableHeadCell = "py-3 align-bottom whitespace-nowrap";
+const tableCell = "py-3.5 align-top";
 
 const cleanDateString = (dateStr) => String(dateStr ?? "").replace(/[^\x20-\x7E]/g, "").trim();
 
@@ -119,6 +124,7 @@ function StockCard({ bean, grams, totals, maxGrams }) {
   const adjusted = Number(totals.adjusted || 0);
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={Package} />
@@ -159,8 +165,8 @@ function StockCard({ bean, grams, totals, maxGrams }) {
 
 function DateFilter({ value, onChange }) {
   return (
-    <div className="flex justify-end mb-3">
-      <div className="relative flex items-center" style={{ gap: 6 }}>
+    <div className="flex justify-end mb-4">
+      <div className="relative flex items-center" style={{ gap: 8 }}>
         <Filter size={14} style={{ color: C.textFaint }} />
         <input
           type="date"
@@ -169,8 +175,8 @@ function DateFilter({ value, onChange }) {
           style={{
             ...inputStyle,
             width: "auto",
-            fontSize: 12,
-            padding: "4px 8px",
+            fontSize: 12.5,
+            padding: "6px 10px",
             borderRadius: 8,
             color: value ? C.text : C.textFaint,
           }}
@@ -231,6 +237,7 @@ function ReceiptForm({ onSubmit, activeLabel }) {
 
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={PlusCircle} />
@@ -243,8 +250,8 @@ function ReceiptForm({ onSubmit, activeLabel }) {
         </span>
       }
     >
-      <form onSubmit={submit} className="flex flex-col gap-3">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <span style={labelStyle}>Bean</span>
             <select style={inputStyle} value={bean} onChange={(e) => setBean(e.target.value)}>
@@ -313,6 +320,7 @@ function CreateStockBatchForm({ onCreate }) {
 
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={Layers} />
@@ -320,11 +328,11 @@ function CreateStockBatchForm({ onCreate }) {
         </span>
       }
     >
-      <form onSubmit={submit} className="flex flex-col gap-3">
+      <form onSubmit={submit} className="flex flex-col gap-4">
         <p style={hintStyle}>
           Starts a new dated FIFO layer at 0 kg. Older layers keep their stock and are still consumed first.
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <span style={labelStyle}>Label (optional)</span>
             <input
@@ -418,6 +426,7 @@ function AdjustStockForm({ layers, onAdjust }) {
 
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={SlidersHorizontal} />
@@ -425,11 +434,11 @@ function AdjustStockForm({ layers, onAdjust }) {
         </span>
       }
     >
-      <form onSubmit={submit} className="flex flex-col gap-3">
+      <form onSubmit={submit} className="flex flex-col gap-4">
         <p style={hintStyle}>
           Manual correction or deduction. Every change is audited in the adjustments table; history is never deleted.
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <span style={labelStyle}>Bean</span>
             <select style={inputStyle} value={bean} onChange={(e) => setBean(e.target.value)}>
@@ -460,7 +469,7 @@ function AdjustStockForm({ layers, onAdjust }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <span style={labelStyle}>Apply to</span>
             <select
@@ -505,7 +514,7 @@ function AdjustStockForm({ layers, onAdjust }) {
 function InventorySubnav({ active, onChange }) {
   return (
     <nav
-      className="flex flex-col gap-0.5 md:sticky md:top-4"
+      className="flex flex-col gap-1 md:sticky md:top-4"
       style={{ borderLeft: `1px solid ${C.glassLine}` }}
     >
       {SUBPAGES.map((page) => {
@@ -519,7 +528,7 @@ function InventorySubnav({ active, onChange }) {
               position: "relative",
               background: "transparent",
               border: "none",
-              padding: "8px 0 8px 16px",
+              padding: "10px 0 10px 16px",
               textAlign: "left",
               cursor: "pointer",
               color: isActive ? C.text : C.textFaint,
@@ -527,6 +536,7 @@ function InventorySubnav({ active, onChange }) {
               fontSize: 12.5,
               fontWeight: isActive ? 700 : 500,
               letterSpacing: "0.01em",
+              whiteSpace: "nowrap",
               transition: "color .15s ease",
             }}
           >
@@ -535,8 +545,8 @@ function InventorySubnav({ active, onChange }) {
                 style={{
                   position: "absolute",
                   left: -1,
-                  top: 6,
-                  bottom: 6,
+                  top: 8,
+                  bottom: 8,
                   width: 2,
                   background: C.amber,
                   borderRadius: 2,
@@ -554,6 +564,7 @@ function InventorySubnav({ active, onChange }) {
 function EmergencyResetPanel({ onOpen }) {
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={RotateCcw} />
@@ -587,6 +598,7 @@ function EmergencyResetPanel({ onOpen }) {
 function StockBatchTable({ layers }) {
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={Layers} />
@@ -600,54 +612,54 @@ function StockBatchTable({ layers }) {
       }
     >
       <div className="overflow-x-auto">
-        <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 12.5 }}>
+        <table style={{ ...tableStyle, minWidth: 980 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.glassLine}`, color: C.textFaint, fontSize: 11 }}>
-              <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Stock batch</th>
-              <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Started</th>
-              <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Received</th>
-              <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Sorted</th>
-              <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Adjusted</th>
-              <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Balance</th>
-              <th className="py-2 text-left whitespace-nowrap pl-3" style={{ fontWeight: 500 }}>Status</th>
+              <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Stock batch</th>
+              <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Started</th>
+              <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Received</th>
+              <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Sorted</th>
+              <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Adjusted</th>
+              <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Balance</th>
+              <th className={`${tableHeadCell} text-left`} style={{ fontWeight: 500 }}>Status</th>
             </tr>
           </thead>
           <tbody>
             {layers.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-6 text-center" style={{ color: C.textFaint }}>
+                <td colSpan={7} className="py-8 text-center" style={{ color: C.textFaint }}>
                   No stock batches yet.
                 </td>
               </tr>
             ) : (
               layers.map((l) => (
                 <tr key={l.id} style={{ borderBottom: `1px solid ${C.glassLine}` }}>
-                  <td className="py-2.5 pr-3">
+                  <td className={`${tableCell} pr-5`}>
                     <div style={{ fontWeight: 700 }}>{l.label}</div>
                     {l.note && (
-                      <div style={{ ...hintStyle, marginTop: 2, maxWidth: 240 }}>{l.note}</div>
+                      <div style={{ ...hintStyle, marginTop: 3, maxWidth: 220 }}>{l.note}</div>
                     )}
                   </td>
-                  <td className="py-2.5 whitespace-nowrap" style={mono}>
+                  <td className={`${tableCell} whitespace-nowrap pr-5`} style={mono}>
                     {cleanDateString(l.started_at).slice(0, 10)}
                   </td>
-                  <td className="py-2.5 text-right whitespace-nowrap" style={mono}>{fmtKg(l.received)}</td>
-                  <td className="py-2.5 text-right whitespace-nowrap" style={mono}>{fmtKg(l.sorted)}</td>
+                  <td className={`${tableCell} text-right whitespace-nowrap pr-5`} style={mono}>{fmtKg(l.received)}</td>
+                  <td className={`${tableCell} text-right whitespace-nowrap pr-5`} style={mono}>{fmtKg(l.sorted)}</td>
                   <td
-                    className="py-2.5 text-right whitespace-nowrap"
+                    className={`${tableCell} text-right whitespace-nowrap pr-5`}
                     style={{ ...mono, color: Number(l.adjusted) < 0 ? C.red : C.green }}
                   >
                     {fmtSignedKg(l.adjusted)}
                   </td>
-                  <td className="py-2.5 text-right whitespace-nowrap" style={{ ...mono, fontWeight: 800 }}>
+                  <td className={`${tableCell} text-right whitespace-nowrap pr-5`} style={{ ...mono, fontWeight: 800 }}>
                     <div>{fmtKg(l.balance)}</div>
-                    <div style={{ fontSize: 10.5, fontWeight: 500, color: C.textFaint }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 500, color: C.textFaint, marginTop: 2 }}>
                       {BEANS.filter((b) => l.beans?.[b])
                         .map((b) => `${b.slice(0, 1)} ${fmtKg(l.beans[b].balance)}`)
                         .join(" · ") || "empty"}
                     </div>
                   </td>
-                  <td className="py-2.5 pl-3 whitespace-nowrap">
+                  <td className={`${tableCell} whitespace-nowrap`}>
                     {l.is_active ? (
                       <span
                         style={{
@@ -672,7 +684,7 @@ function StockBatchTable({ layers }) {
           </tbody>
         </table>
       </div>
-      <p style={{ ...hintStyle, marginTop: 12 }}>
+      <p style={{ ...hintStyle, marginTop: 16 }}>
         Overall stock is the sum of every layer. New receipts use the active layer; sorting and deductions consume the oldest
         positive layer first.
       </p>
@@ -690,6 +702,7 @@ function AdjustmentsTable({ adjustments }) {
 
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2">
           <IconChip icon={SlidersHorizontal} />
@@ -710,15 +723,15 @@ function AdjustmentsTable({ adjustments }) {
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 12.5 }}>
+          <table style={{ ...tableStyle, minWidth: 980 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.glassLine}`, color: C.textFaint, fontSize: 11 }}>
-                <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Date</th>
-                <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Bean</th>
-                <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Change</th>
-                <th className="py-2 text-left" style={{ fontWeight: 500 }}>Reason</th>
-                <th className="py-2 text-left whitespace-nowrap pl-3" style={{ fontWeight: 500 }}>Stock batch</th>
-                <th className="py-2 text-left whitespace-nowrap pl-3" style={{ fontWeight: 500 }}>Reference</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Date</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Bean</th>
+                <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Change</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Reason</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Stock batch</th>
+                <th className={`${tableHeadCell} text-left`} style={{ fontWeight: 500 }}>Reference</th>
               </tr>
             </thead>
             <tbody>
@@ -726,24 +739,26 @@ function AdjustmentsTable({ adjustments }) {
                 const positive = Number(a.grams) >= 0;
                 return (
                   <tr key={a.key} style={{ borderBottom: `1px solid ${C.glassLine}` }}>
-                    <td className="py-2 whitespace-nowrap" style={mono}>{cleanDateString(a.date).slice(0, 16)}</td>
-                    <td className="py-2">{a.bean}</td>
+                    <td className={`${tableCell} whitespace-nowrap pr-5`} style={mono}>{cleanDateString(a.date).slice(0, 16)}</td>
+                    <td className={`${tableCell} whitespace-nowrap pr-5`}>{a.bean}</td>
                     <td
-                      className="py-2 text-right whitespace-nowrap"
+                      className={`${tableCell} whitespace-nowrap pr-5 text-right`}
                       style={{ ...mono, fontWeight: 700, color: positive ? C.green : C.red }}
                     >
                       {fmtSignedKg(a.grams)}
                     </td>
-                    <td className="py-2" style={{ color: C.textDim, maxWidth: 220 }}>{a.note}</td>
-                    <td className="py-2 pl-3" style={{ maxWidth: 240 }}>
+                    <td className={`${tableCell} pr-5`} style={{ color: C.textDim, maxWidth: 260, lineHeight: 1.5 }}>
+                      {a.note}
+                    </td>
+                    <td className={`${tableCell} pr-5`} style={{ maxWidth: 220, lineHeight: 1.5 }}>
                       <span title={a.layers.join(", ")} style={{ color: C.textDim }}>
                         {a.layers.join(", ") || "—"}
                       </span>
                       {a.count > 1 && (
-                        <span style={{ ...hintStyle, display: "block" }}>{a.count} layer allocations</span>
+                        <span style={{ ...hintStyle, display: "block", marginTop: 2 }}>{a.count} layer allocations</span>
                       )}
                     </td>
-                    <td className="py-2 pl-3 whitespace-nowrap" style={{ ...mono, fontSize: 11, color: C.textFaint }}>
+                    <td className={`${tableCell} whitespace-nowrap`} style={{ ...mono, fontSize: 11, color: C.textFaint }}>
                       {a.reference || "—"}
                     </td>
                   </tr>
@@ -776,6 +791,7 @@ function MovementTable({ title, icon, data, isIncoming }) {
 
   return (
     <Panel
+      bodyStyle={panelBodyStyle}
       title={
         <span className="flex items-center gap-2" style={{ color: headerColor }}>
           <IconChip icon={icon} />
@@ -791,15 +807,15 @@ function MovementTable({ title, icon, data, isIncoming }) {
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 12.5 }}>
+          <table style={{ ...tableStyle, minWidth: 950 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.glassLine}`, color: C.textFaint, fontSize: 11 }}>
-                <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Date</th>
-                <th className="py-2 text-left whitespace-nowrap" style={{ fontWeight: 500 }}>Bean</th>
-                <th className="py-2 text-right whitespace-nowrap" style={{ fontWeight: 500 }}>Amount</th>
-                <th className="py-2 text-left whitespace-nowrap pl-3" style={{ fontWeight: 500 }}>Batch</th>
-                <th className="py-2 text-left pl-3" style={{ fontWeight: 500 }}>Stock batch</th>
-                <th className="py-2 text-left" style={{ fontWeight: 500 }}>Note</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Date</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Bean</th>
+                <th className={`${tableHeadCell} pr-5 text-right`} style={{ fontWeight: 500 }}>Amount</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Batch</th>
+                <th className={`${tableHeadCell} pr-5 text-left`} style={{ fontWeight: 500 }}>Stock batch</th>
+                <th className={`${tableHeadCell} text-left`} style={{ fontWeight: 500 }}>Note</th>
               </tr>
             </thead>
             <tbody>
@@ -808,19 +824,23 @@ function MovementTable({ title, icon, data, isIncoming }) {
                 const layerText = m.layers?.length ? m.layers.join(", ") : m.stock_batch_label || "—";
                 return (
                   <tr key={`${m.movement_date}-${m.batch_code || ""}-${i}`} style={{ borderBottom: `1px solid ${C.glassLine}` }}>
-                    <td className="py-2 whitespace-nowrap" style={mono}>{cleanDateString(m.movement_date).slice(0, 16)}</td>
-                    <td className="py-2">{m.bean_type}</td>
+                    <td className={`${tableCell} whitespace-nowrap pr-5`} style={mono}>{cleanDateString(m.movement_date).slice(0, 16)}</td>
+                    <td className={`${tableCell} whitespace-nowrap pr-5`}>{m.bean_type}</td>
                     <td
-                      className="py-2 text-right whitespace-nowrap"
+                      className={`${tableCell} text-right whitespace-nowrap pr-5`}
                       style={{ ...mono, fontWeight: 700, color: amountColor }}
                     >
                       {m.grams >= 0 ? "+" : ""}{Math.round(m.grams)} g
                     </td>
-                    <td className="py-2 pl-3" style={mono}>{m.batch_code || "—"}</td>
-                    <td className="py-2 pl-3" style={{ color: C.textDim, maxWidth: 180 }}>
+                    <td className={`${tableCell} whitespace-nowrap pr-5`} style={mono}>{m.batch_code || "—"}</td>
+                    <td className={`${tableCell} pr-5`} style={{ color: C.textDim, maxWidth: 220, lineHeight: 1.5 }}>
                       <span title={layerText}>{layerText}</span>
                     </td>
-                    <td className="py-2" style={{ color: C.textDim, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <td
+                      className={`${tableCell} whitespace-nowrap`}
+                      style={{ color: C.textDim, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}
+                      title={m.note || ""}
+                    >
                       {m.note || ""}
                     </td>
                   </tr>
@@ -1415,7 +1435,7 @@ export default function InventoryPage({
   }
 
   return (
-    <div className="flex flex-col gap-5 w-full max-w-6xl mx-auto">
+    <div className="flex flex-col gap-6 w-full max-w-7xl mx-auto">
       {/* header */}
       <div>
         <div style={{ ...display, fontSize: 32, fontWeight: 700, letterSpacing: "-0.015em", lineHeight: 1.15 }}>
@@ -1426,18 +1446,18 @@ export default function InventoryPage({
         </div>
       </div>
 
-      <div className="flex flex-col md:flex-row gap-6 md:gap-8 items-start">
-        <aside className="w-full md:w-44 md:shrink-0">
-          <div style={{ ...labelStyle, marginBottom: 8 }}>SECTIONS</div>
+      <div className="flex flex-col md:flex-row gap-6 md:gap-10 items-start">
+        <aside className="w-full md:w-48 md:shrink-0">
+          <div style={{ ...labelStyle, marginBottom: 10 }}>SECTIONS</div>
           <InventorySubnav active={tab} onChange={setTab} />
         </aside>
 
-        <div className="flex-1 min-w-0 w-full flex flex-col gap-5">
+        <div className="flex-1 min-w-0 w-full flex flex-col gap-6">
           {tab === "overview" && (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               <div>
                 <SectionLabel>STOCK ON HAND</SectionLabel>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-2">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-3">
                   {BEANS.map((b) => (
                     <StockCard
                       key={b}
@@ -1451,6 +1471,7 @@ export default function InventoryPage({
               </div>
 
               <Panel
+                bodyStyle={panelBodyStyle}
                 title={
                   <span className="flex items-center gap-2">
                     <IconChip icon={Layers} />
@@ -1480,7 +1501,7 @@ export default function InventoryPage({
           )}
 
           {tab === "receipts" && (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               <ReceiptForm onSubmit={onAddMovement} activeLabel={activeLabel} />
               <MovementTable
                 title="Received Green Beans (IN)"
@@ -1492,14 +1513,14 @@ export default function InventoryPage({
           )}
 
           {tab === "batches" && (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               <CreateStockBatchForm onCreate={onCreateStockBatch} />
               <StockBatchTable layers={stockBatches} />
             </div>
           )}
 
           {tab === "adjustments" && (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               <AdjustStockForm layers={stockBatches} onAdjust={onAdjustStock} />
               {resetNotice && (
                 <div
@@ -1521,7 +1542,7 @@ export default function InventoryPage({
           )}
 
           {tab === "activity" && (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               <div className="flex justify-between items-center mb-2 flex-wrap gap-3">
                 <SectionLabel>ACTIVITY &amp; EXPORTS</SectionLabel>
                 <div className="flex gap-2">

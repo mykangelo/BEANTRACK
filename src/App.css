@@ -10,6 +10,12 @@
   background: linear-gradient(to right, var(--fill) 0%, var(--fill) var(--pct), rgba(120,84,40,0.16) var(--pct), rgba(120,84,40,0.16) 100%);
 }
 .bt-range:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.bt-knob:focus-visible {
+  outline: 2px solid #C99A2E;
+  outline-offset: 4px;
+  border-radius: 50%;
+}
 .bt-range::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none; width: 24px; height: 24px; border-radius: 50%; background: #fff;
   border: 3px solid var(--fill); box-shadow: 0 3px 10px rgba(60,40,15,0.30); transition: transform .15s ease;

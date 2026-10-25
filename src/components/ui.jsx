@@ -4,7 +4,7 @@ import { C, blur, mono, sans, display } from "../appTokens";
 /* ---------------------------------------------------------------
    PANEL — frosted-glass card with optional title row
 --------------------------------------------------------------- */
-export function Panel({ title, right, children, style }) {
+export function Panel({ title, right, children, style, bodyStyle }) {
   return (
     <div
       style={{
@@ -25,7 +25,9 @@ export function Panel({ title, right, children, style }) {
           {right}
         </div>
       )}
-      <div className={title ? "px-5 pt-3 pb-5" : "p-5"}>{children}</div>
+      <div className={title ? "px-5 pt-3 pb-5" : "p-5"} style={bodyStyle}>
+        {children}
+      </div>
     </div>
   );
 }

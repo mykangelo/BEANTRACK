@@ -1,4 +1,4 @@
-import { API_BASE } from "./appConstants";
+import { API_BASE, API_TOKEN } from "./appConstants.js";
 
 /* ---------------- numbers and time ---------------- */
 
@@ -37,6 +37,8 @@ export function mapDbBatch(row) {
       debris: Number(row.small_weight) + Number(row.fine_weight),
     },
     processingTime: Number(row.processing_time),
+    source: row.source === "simulated" ? "simulated" : "hardware",
+    status: row.status || "Completed",
   };
 }
 
@@ -70,11 +72,15 @@ export function sortingLoss(inputWeight, large, medium) {
 
 /* ---------------- network ---------------- */
 
+function authHeaders(extra = {}) {
+  return API_TOKEN ? { ...extra, "X-BeanTrack-Token": API_TOKEN } : extra;
+}
+
 // GET a JSON endpoint. Throws an Error that carries the server's message when there is one.
 export async function getJson(path) {
   let res;
   try {
-    res = await fetch(`${API_BASE}/${path}`);
+    res = await fetch(`${API_BASE}/${path}`, { headers: authHeaders() });
   } catch {
     throw new Error("Cannot reach the database server. Check that XAMPP is running.");
   }
@@ -95,7 +101,7 @@ export async function postJson(path, body) {
   try {
     res = await fetch(`${API_BASE}/${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     });
   } catch {

@@ -1,145 +1,168 @@
--- phpMyAdmin SQL Dump
--- version 5.2.1
--- https://www.phpmyadmin.net/
+-- BeanTrack database schema.
 --
--- Host: 127.0.0.1
--- Generation Time: Oct 01, 2026 at 09:47 AM
--- Server version: 10.4.32-MariaDB
--- PHP Version: 8.2.12
-
-SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
-START TRANSACTION;
-SET time_zone = "+00:00";
-
-
-/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
-/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
-/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
-/*!40101 SET NAMES utf8mb4 */;
-
+-- This file is a convenience dump that matches beantrack-api/migrations/*.sql.
+-- The migrations are the source of truth: on a new machine prefer
 --
--- Database: `beantrack`
+--   php beantrack-api/migrate.php
 --
+-- from the repository root (see README.md). Import this file through
+-- phpMyAdmin only if you cannot run PHP from the command line.
+--
+-- It contains no sample batches. Record green bean receipts on the Inventory
+-- page before sorting.
+
+SET NAMES utf8mb4;
 
 -- --------------------------------------------------------
+-- Schema version tracking (matches migrate.php)
+-- --------------------------------------------------------
 
---
--- Table structure for table `batches`
---
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version    VARCHAR(64) PRIMARY KEY,
+  applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE `batches` (
-  `id` int(11) NOT NULL,
-  `batch_code` varchar(10) NOT NULL,
-  `date_time` datetime DEFAULT current_timestamp(),
-  `bean_type` varchar(20) NOT NULL,
-  `mode` varchar(20) NOT NULL,
-  `vibration_speed` int(11) NOT NULL,
-  `input_weight` int(11) NOT NULL,
-  `large_weight` int(11) DEFAULT 0,
-  `medium_weight` int(11) DEFAULT 0,
-  `small_weight` int(11) DEFAULT 0,
-  `fine_weight` int(11) DEFAULT 0,
-  `processing_time` int(11) DEFAULT 0
+INSERT IGNORE INTO schema_migrations (version) VALUES
+  ('0001_baseline'),
+  ('0002_inventory'),
+  ('0003_batch_audit'),
+  ('0004_stock_batches');
+
+-- --------------------------------------------------------
+-- Tables
+-- --------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS bean_types (
+  code VARCHAR(20) PRIMARY KEY,
+  name VARCHAR(40) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+INSERT IGNORE INTO bean_types (code, name) VALUES ('Arabica', 'Arabica'), ('Robusta', 'Robusta');
+
+CREATE TABLE IF NOT EXISTS batches (
+  id              INT AUTO_INCREMENT PRIMARY KEY,
+  batch_code      VARCHAR(20) NOT NULL UNIQUE,
+  date_time       DATETIME NOT NULL,
+  bean_type       VARCHAR(20) NOT NULL,
+  mode            VARCHAR(20) NOT NULL,
+  source          ENUM('hardware','simulated') NOT NULL DEFAULT 'hardware',
+  vibration_speed DECIMAL(5,2) NOT NULL DEFAULT 0,
+  input_weight    DECIMAL(10,2) NOT NULL,
+  large_weight    DECIMAL(10,2) NOT NULL DEFAULT 0,
+  medium_weight   DECIMAL(10,2) NOT NULL DEFAULT 0,
+  small_weight    DECIMAL(10,2) NOT NULL DEFAULT 0,
+  fine_weight     DECIMAL(10,2) NOT NULL DEFAULT 0,
+  processing_time INT NOT NULL DEFAULT 0,
+  status          ENUM('Completed','Partial','Error') NOT NULL DEFAULT 'Completed',
+  created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_batches_bean FOREIGN KEY (bean_type) REFERENCES bean_types(code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Dated stock batches: FIFO layers of green beans. New receipts go into the
+-- active layer; sorting and manual deductions consume the oldest layer first.
+CREATE TABLE IF NOT EXISTS stock_batches (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  label      VARCHAR(40) NOT NULL,
+  started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  is_active  TINYINT(1) NOT NULL DEFAULT 0,
+  note       VARCHAR(255) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_stock_batch_label (label)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- A fresh install still needs one active layer to receive the first receipt.
+INSERT INTO stock_batches (label, started_at, is_active, note)
+SELECT 'Opening stock (migrated)', NOW(), 1, 'Created by the initial import'
+WHERE NOT EXISTS (SELECT 1 FROM stock_batches);
+
+-- Green bean stock movements.
+-- receipt:    positive grams (beans received)
+-- sort_in:    negative grams (beans taken by a sorting batch)
+-- adjustment: positive or negative manual correction, with a reason
+CREATE TABLE IF NOT EXISTS inventory_movements (
+  id              INT AUTO_INCREMENT PRIMARY KEY,
+  movement_date   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  bean_type       VARCHAR(20) NOT NULL,
+  stock_batch_id  INT NOT NULL,
+  movement_type   ENUM('receipt','sort_in','adjustment') NOT NULL,
+  grams           DECIMAL(12,2) NOT NULL,
+  batch_code      VARCHAR(20) NULL,
+  reference_code  VARCHAR(32) NULL,
+  note            VARCHAR(255) NULL,
+  CONSTRAINT chk_grams_nonzero CHECK (grams <> 0),
+  CONSTRAINT fk_moves_bean FOREIGN KEY (bean_type) REFERENCES bean_types(code),
+  CONSTRAINT fk_moves_batch FOREIGN KEY (batch_code) REFERENCES batches(batch_code) ON DELETE RESTRICT,
+  CONSTRAINT fk_moves_stock_batch FOREIGN KEY (stock_batch_id) REFERENCES stock_batches(id),
+  -- One sorting run can consume from several layers, hence stock_batch_id.
+  UNIQUE KEY uq_batch_stock_move (batch_code, stock_batch_id, movement_type),
+  INDEX idx_stock (bean_type),
+  INDEX idx_moves_stock_batch (stock_batch_id, bean_type),
+  INDEX idx_moves_reference (reference_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS accuracy_checks (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  batch_code       VARCHAR(20) NOT NULL,
+  bin_name         ENUM('large','medium') NOT NULL,
+  beans_checked    DECIMAL(10,2) NOT NULL,
+  correctly_sorted DECIMAL(10,2) NOT NULL,
+  checked_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_accuracy (batch_code, bin_name),
+  CONSTRAINT fk_accuracy_batch FOREIGN KEY (batch_code) REFERENCES batches(batch_code) ON DELETE CASCADE,
+  CONSTRAINT chk_accuracy CHECK (correctly_sorted >= 0 AND correctly_sorted <= beans_checked)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
-
---
--- Table structure for table `accuracy_checks`
---
-
-CREATE TABLE `accuracy_checks` (
-  `id` int(11) NOT NULL,
-  `batch_code` varchar(10) NOT NULL,
-  `bin_name` varchar(20) NOT NULL,
-  `beans_checked` decimal(10,2) NOT NULL DEFAULT 0.00,
-  `correctly_sorted` decimal(10,2) NOT NULL DEFAULT 0.00,
-  `created_at` datetime DEFAULT current_timestamp(),
-  UNIQUE KEY `batch_bin` (`batch_code`,`bin_name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `batches`
---
-
-INSERT INTO `batches` (`id`, `batch_code`, `date_time`, `bean_type`, `mode`, `vibration_speed`, `input_weight`, `large_weight`, `medium_weight`, `small_weight`, `fine_weight`, `processing_time`) VALUES
-(3, 'B005', '2026-10-01 15:25:44', 'Arabica', 'Automatic', 60, 1000, 340, 389, 149, 98, 59);
-
+-- Views
 -- --------------------------------------------------------
 
---
--- Table structure for table `inventory`
---
+-- Stock on hand per bean type (green beans only)
+CREATE OR REPLACE VIEW v_stock AS
+SELECT bean_type, SUM(grams) AS grams
+FROM inventory_movements
+GROUP BY bean_type;
 
-CREATE TABLE `inventory` (
-  `id` int(11) NOT NULL,
-  `bean_type` varchar(20) NOT NULL,
-  `category` varchar(20) NOT NULL,
-  `quantity_kg` decimal(10,2) DEFAULT 0.00,
-  `updated_at` datetime DEFAULT current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+-- Per-stock-batch totals (receipts, sortings, adjustments, balance)
+CREATE OR REPLACE VIEW v_stock_batches AS
+SELECT
+  sb.id,
+  sb.label,
+  sb.started_at,
+  sb.is_active,
+  sb.note,
+  COALESCE(SUM(CASE WHEN m.movement_type = 'receipt'    THEN m.grams END), 0) AS received_g,
+  COALESCE(-SUM(CASE WHEN m.movement_type = 'sort_in'    THEN m.grams END), 0) AS sorted_g,
+  COALESCE(SUM(CASE WHEN m.movement_type = 'adjustment' THEN m.grams END), 0) AS adjusted_g,
+  COALESCE(SUM(m.grams), 0) AS balance_g
+FROM stock_batches sb
+LEFT JOIN inventory_movements m ON m.stock_batch_id = sb.id
+GROUP BY sb.id, sb.label, sb.started_at, sb.is_active, sb.note;
 
---
--- Dumping data for table `inventory`
---
+-- Audited manual corrections only
+CREATE OR REPLACE VIEW v_stock_adjustments AS
+SELECT
+  m.id,
+  m.movement_date,
+  m.bean_type,
+  m.grams,
+  m.reference_code,
+  m.note,
+  m.stock_batch_id,
+  sb.label AS stock_batch_label
+FROM inventory_movements m
+JOIN stock_batches sb ON sb.id = m.stock_batch_id
+WHERE m.movement_type = 'adjustment';
 
-INSERT INTO `inventory` (`id`, `bean_type`, `category`, `quantity_kg`, `updated_at`) VALUES
-(1, 'Arabica', 'large', 5.54, '2026-10-01 14:56:27'),
-(2, 'Arabica', 'medium', 7.79, '2026-10-01 14:56:27'),
-(3, 'Arabica', 'small', 2.25, '2026-10-01 14:56:27'),
-(4, 'Arabica', 'fine', 0.90, '2026-10-01 14:56:27'),
-(5, 'Robusta', 'large', 3.50, '2026-10-01 14:56:27'),
-(6, 'Robusta', 'medium', 4.80, '2026-10-01 14:56:27'),
-(7, 'Robusta', 'small', 1.20, '2026-10-01 14:56:27'),
-(8, 'Robusta', 'fine', 0.40, '2026-10-01 14:56:27');
-
---
--- Indexes for dumped tables
---
-
---
--- Indexes for table `batches`
---
-ALTER TABLE `batches`
-  ADD PRIMARY KEY (`id`),
-  ADD UNIQUE KEY `batch_code` (`batch_code`);
-
---
--- Indexes for table `accuracy_checks`
---
-ALTER TABLE `accuracy_checks`
-  ADD PRIMARY KEY (`id`);
-
---
--- Indexes for table `inventory`
---
-ALTER TABLE `inventory`
-  ADD PRIMARY KEY (`id`),
-  ADD UNIQUE KEY `bean_category` (`bean_type`,`category`);
-
---
--- AUTO_INCREMENT for dumped tables
---
-
---
--- AUTO_INCREMENT for table `batches`
---
-ALTER TABLE `batches`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
-
---
--- AUTO_INCREMENT for table `accuracy_checks`
---
-ALTER TABLE `accuracy_checks`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
-
---
--- AUTO_INCREMENT for table `inventory`
---
-ALTER TABLE `inventory`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=9;
-COMMIT;
-
-/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
-/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
-/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+-- Per-batch loss
+CREATE OR REPLACE VIEW v_batch_loss AS
+SELECT
+  batch_code,
+  bean_type,
+  mode,
+  date_time,
+  input_weight,
+  large_weight + medium_weight AS recovered_g,
+  input_weight - (large_weight + medium_weight) AS loss_g,
+  ROUND((input_weight - (large_weight + medium_weight)) / input_weight * 100, 1) AS loss_pct
+FROM batches
+WHERE input_weight > 0;

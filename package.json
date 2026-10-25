@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
+    "test": "node --test src/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,7 +17,6 @@
     "lucide-react": "^1.49.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "recharts": "^3.10.1",
     "tailwindcss": "^4.3.3",
     "xlsx-js-style": "^1.2.0"
   },

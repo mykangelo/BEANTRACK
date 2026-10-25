@@ -1,14 +1,32 @@
 import { useState } from "react";
 import { X, Info, Activity, Search, Filter } from "lucide-react";
 import { C, mono, display } from "../appTokens";
-import { Panel } from "../components/ui";
-
-const CATS = ["large", "medium"];
-const CAT_LABEL = { large: "Large Beans", medium: "Small Beans" };
-const BIN_INFO = { large: "Bin 1 · >5 mm", medium: "Bin 2 · 4–5 mm" };
+import { Panel, SectionLabel } from "../components/ui";
+import AccuracyPanel from "../components/AccuracyPanel";
 
 function fmtTime(seconds) { 
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`; 
+}
+
+function RunTag({ label, color }) {
+  return (
+    <span
+      style={{
+        ...mono,
+        fontSize: 9.5,
+        fontWeight: 700,
+        letterSpacing: "0.04em",
+        padding: "1px 6px",
+        borderRadius: 999,
+        color,
+        border: `1px solid ${color}66`,
+        marginLeft: 6,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
 }
 
 function BeanTag({ bean }) { 
@@ -53,7 +71,7 @@ const filterInputStyle = {
   outline: "none",
 };
 
-export default function BatchHistoryPage({ batches, sel, setSel }) {
+export default function BatchHistoryPage({ batches, sel, setSel, accuracy = {}, onSaveAccuracy }) {
   const selected = batches.find((batch) => batch.id === sel) || null;
 
   // Filter States
@@ -193,7 +211,12 @@ export default function BatchHistoryPage({ batches, sel, setSel }) {
                           onMouseEnter={(e) => { if(!active) e.currentTarget.style.background = "rgba(255, 255, 255, 0.1)" }}
                           onMouseLeave={(e) => { if(!active) e.currentTarget.style.background = "transparent" }}
                         >
-                          <td className="py-2.5 pr-3" style={{ ...mono, fontSize: 13 }}>{batch.id}</td>
+                          <td className="py-2.5 pr-3" style={{ ...mono, fontSize: 13 }}>
+                            {batch.id}
+                            {batch.sample && <RunTag label="SAMPLE" color={C.textFaint} />}
+                            {batch.source === "simulated" && <RunTag label="SIM" color={C.amber} />}
+                            {batch.status === "Partial" && <RunTag label="PARTIAL" color={C.amber} />}
+                          </td>
                           <td className="py-2.5 pr-3" style={{ fontSize: 12.5, color: C.textDim }}>{batch.date}</td>
                           <td className="py-2.5 pr-3"><BeanTag bean={batch.beanType} /></td>
                           <td className="py-2.5 pr-3" style={{ ...mono, fontSize: 12.5 }}>{batch.inputWeight}g</td>
@@ -233,6 +256,11 @@ export default function BatchHistoryPage({ batches, sel, setSel }) {
                 <div style={{ fontSize: 12.5, color: C.textDim, marginTop: 2 }}>
                   Total Input: <span style={{ ...mono, color: C.text }}>{selected.inputWeight} g</span>
                 </div>
+                <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>
+                  <span>{selected.source === "simulated" ? "Simulated run" : "Hardware run"}</span>
+                  <span>·</span>
+                  <span>{selected.status}</span>
+                </div>
               </div>
 
               <div>
@@ -267,6 +295,17 @@ export default function BatchHistoryPage({ batches, sel, setSel }) {
               <Info size={24} className="mb-2 opacity-50" />
               <div style={{ fontSize: 13 }}>Select a batch to view insights</div>
               <div style={{ fontSize: 11, marginTop: 4 }}>Visual breakdown will appear here</div>
+            </div>
+          )}
+
+          {batches.some((batch) => !batch.sample) && (
+            <div className="flex flex-col gap-3 mt-5">
+              <SectionLabel>ACCURACY CHECKS</SectionLabel>
+              <AccuracyPanel
+                batches={batches.filter((batch) => !batch.sample)}
+                accuracy={accuracy}
+                onSave={onSaveAccuracy}
+              />
             </div>
           )}
         </div>

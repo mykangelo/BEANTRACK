@@ -1,16 +1,17 @@
-CREATE TABLE bean_types (
+CREATE TABLE IF NOT EXISTS bean_types (
   code VARCHAR(20) PRIMARY KEY,
   name VARCHAR(40) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-INSERT INTO bean_types (code, name) VALUES ('Arabica', 'Arabica'), ('Robusta', 'Robusta');
+INSERT IGNORE INTO bean_types (code, name) VALUES ('Arabica', 'Arabica'), ('Robusta', 'Robusta');
 
-CREATE TABLE batches (
+CREATE TABLE IF NOT EXISTS batches (
   id              INT AUTO_INCREMENT PRIMARY KEY,
   batch_code      VARCHAR(20) NOT NULL UNIQUE,
   date_time       DATETIME NOT NULL,
   bean_type       VARCHAR(20) NOT NULL,
   mode            VARCHAR(20) NOT NULL,
+  source          ENUM('hardware','simulated') NOT NULL DEFAULT 'hardware',
   vibration_speed DECIMAL(5,2) NOT NULL DEFAULT 0,
   input_weight    DECIMAL(10,2) NOT NULL,
   large_weight    DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -18,7 +19,7 @@ CREATE TABLE batches (
   small_weight    DECIMAL(10,2) NOT NULL DEFAULT 0,
   fine_weight     DECIMAL(10,2) NOT NULL DEFAULT 0,
   processing_time INT NOT NULL DEFAULT 0,
-  status          ENUM('Completed','Error') NOT NULL DEFAULT 'Completed',
+  status          ENUM('Completed','Partial','Error') NOT NULL DEFAULT 'Completed',
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_batches_bean FOREIGN KEY (bean_type) REFERENCES bean_types(code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -26,7 +27,7 @@ CREATE TABLE batches (
 -- Green bean stock movements.
 -- receipt: positive grams (beans received)
 -- sort_in: negative grams (beans taken by a sorting batch)
-CREATE TABLE inventory_movements (
+CREATE TABLE IF NOT EXISTS inventory_movements (
   id            INT AUTO_INCREMENT PRIMARY KEY,
   movement_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   bean_type     VARCHAR(20) NOT NULL,
@@ -41,7 +42,7 @@ CREATE TABLE inventory_movements (
   INDEX idx_stock (bean_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE accuracy_checks (
+CREATE TABLE IF NOT EXISTS accuracy_checks (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   batch_code       VARCHAR(20) NOT NULL,
   bin_name         ENUM('large','medium') NOT NULL,

@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local secrets (API token, database passwords, etc.)
+.env
+.env.*
+beantrack-api/config.local.php
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

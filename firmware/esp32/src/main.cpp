@@ -52,6 +52,33 @@ long rawZeroBottom = 0;
 long deltaTop      = 0;
 long deltaBottom   = 0;
 
+// --- Per-batch baseline ---
+// Telemetry reports how much each deck has collected since the batch started,
+// so leftovers from the previous batch do not count towards the new target.
+float batchBaseTop    = 0.0;
+float batchBaseBottom = 0.0;
+
+// --- Non-blocking tare / calibration job ---
+// HX711 reads are ~10 Hz; averaging 30 samples blocks for ~3 s. Taking one
+// sample per loop keeps the WebSocket telemetry flowing instead.
+enum CalJob { CAL_NONE, CAL_TARE, CAL_FACTOR };
+CalJob calJob = CAL_NONE;
+int    calStage = 0;              // 0 = top deck, 1 = bottom deck (tare only)
+bool   calIsTop = true;
+float  calKnownWeight = 0;
+long   calSum = 0;
+int    calSamples = 0;
+unsigned long calSettleUntil = 0;
+unsigned long calDeadline = 0;
+const int CAL_SAMPLES = 30;
+const unsigned long CAL_SETTLE_MS = 400;
+const unsigned long CAL_TIMEOUT_MS = 15000;
+
+// --- Load-cell health (reported to the dashboard as a fault) ---
+unsigned long lastScaleReadyMs = 0;
+bool loadcellFaultReported = false;
+const unsigned long SCALE_FAULT_MS = 5000;
+
 // --- Soft start ---
 const int RAMP_STEP_PER_LOOP = 2; 
 int rampSpeed = 0;
@@ -65,6 +92,20 @@ String operatingMode = "Automatic";
 
 unsigned long lastPrintTime = 0;
 
+// Auto-stop: input target, or N seconds with no meaningful weight change
+// after beans have started landing on the decks (stuck mesh / debris loss).
+const unsigned long WEIGHT_IDLE_MS = 10000;
+const float WEIGHT_CHANGE_G        = 5.0;
+const float WEIGHT_FLOW_G          = 20.0;
+
+float batchTargetGrams = 0;
+bool  watchArmed = false;
+bool  haveBaseline = false;
+bool  seenWeightFlow = false;
+float baselineTotal = 0;
+float lastWatchedTotal = 0;
+unsigned long lastWeightChangeMs = 0;
+
 // --- Button debounce ---
 bool lastButtonState = HIGH;
 bool debouncedButtonState = HIGH;
@@ -76,11 +117,100 @@ int smoothedPotValue = 0;
 int lastPotPercent = 0;
 const float POT_ALPHA = 0.2;
 
+String jsonEscape(String s) {
+  s.replace("\\", "\\\\");
+  s.replace("\"", "\\\"");
+  s.replace("\r", "\\r");
+  s.replace("\n", "\\n");
+  s.replace("\t", "\\t");
+  return s;
+}
+
 void sendLogEvent(String msg) {
   Serial.println(msg);
   if (wsClientConnected) {
-    String jsonLog = "{\"type\":\"log\",\"message\":\"" + msg + "\"}";
+    String jsonLog = "{\"type\":\"log\",\"message\":\"" + jsonEscape(msg) + "\"}";
     webSocket.broadcastTXT(jsonLog);
+  }
+}
+
+void armBatchWatch() {
+  watchArmed = true;
+  haveBaseline = false;
+  seenWeightFlow = false;
+  lastWeightChangeMs = millis();
+}
+
+float displayGrams(float filtered) {
+  return (abs(filtered) < ZERO_DEADBAND) ? 0.0 : filtered;
+}
+
+void setSystemOff(const String& reason) {
+  systemOn = false;
+  forceFullSpeed = false;
+  watchArmed = false;
+  digitalWrite(STATUS_LED_PIN, LOW);
+  ledcWrite(PWM_CHANNEL, 0);
+  sendLogEvent(reason);
+}
+
+void setSystemOn(const String& reason) {
+  systemOn = true;
+  loadcellFaultReported = false;
+  lastScaleReadyMs = millis();
+
+  // The batch measures what lands from now on, not what is already on the decks.
+  batchBaseTop = displayGrams(filteredTopGrams);
+  batchBaseBottom = displayGrams(filteredBottomGrams);
+
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  armBatchWatch();
+  sendLogEvent(reason);
+}
+
+void maybeAutoStop(float totalGrams) {
+  if (!systemOn || !watchArmed) return;
+
+  unsigned long now = millis();
+  if (!haveBaseline) {
+    baselineTotal = totalGrams;
+    lastWatchedTotal = totalGrams;
+    lastWeightChangeMs = now;
+    haveBaseline = true;
+    return;
+  }
+
+  float delta = totalGrams - lastWatchedTotal;
+  if (delta < 0) delta = -delta;
+  if (delta >= WEIGHT_CHANGE_G) {
+    lastWatchedTotal = totalGrams;
+    lastWeightChangeMs = now;
+    if (totalGrams >= baselineTotal + WEIGHT_FLOW_G) seenWeightFlow = true;
+  }
+
+  if (batchTargetGrams > 0 && totalGrams >= batchTargetGrams) {
+    setSystemOff("[AUTO] Input weight reached");
+    return;
+  }
+
+  if (seenWeightFlow && (now - lastWeightChangeMs >= WEIGHT_IDLE_MS)) {
+    setSystemOff("[AUTO] Weight unchanged, batch complete");
+  }
+}
+
+// If neither HX711 delivers a reading for a while during a run, stop and tell
+// the dashboard. Both channels idle means the modules are unplugged or dead.
+void checkLoadCellHealth() {
+  if (!systemOn || loadcellFaultReported) return;
+
+  if (topScaleLeft.is_ready() || bottomScaleRight.is_ready()) {
+    lastScaleReadyMs = millis();
+    return;
+  }
+
+  if (millis() - lastScaleReadyMs >= SCALE_FAULT_MS) {
+    loadcellFaultReported = true;
+    setSystemOff("[FAULT] loadcell: no readings from either HX711 for 5 s");
   }
 }
 
@@ -118,25 +248,18 @@ void loadSettings() {
 // Tare both decks to zero
 // ---------------------------------------------------------------
 void tareBoth() {
+  if (calJob != CAL_NONE) {
+    sendLogEvent("[CAL] Busy. Wait for the current tare/calibration to finish.");
+    return;
+  }
+
   sendLogEvent("[TARE] Zeroing both decks... keep hands off!");
-  delay(500);
-
-  if (topScaleLeft.wait_ready_timeout(1000)) {
-    rawZeroTop = topScaleLeft.read_average(30);
-    topScaleLeft.set_offset(rawZeroTop);
-    filteredTopGrams = 0.0;
-    deltaTop = 0;
-  }
-
-  if (bottomScaleRight.wait_ready_timeout(1000)) {
-    rawZeroBottom = bottomScaleRight.read_average(30);
-    bottomScaleRight.set_offset(rawZeroBottom);
-    filteredBottomGrams = 0.0;
-    deltaBottom = 0;
-  }
-
-  saveSettings();
-  sendLogEvent("[TARE DONE] Decks zeroed to 0.0 g!");
+  calJob = CAL_TARE;
+  calStage = 0;
+  calSamples = 0;
+  calSum = 0;
+  calSettleUntil = millis() + CAL_SETTLE_MS;
+  calDeadline = millis() + CAL_TIMEOUT_MS;
 }
 
 // ---------------------------------------------------------------
@@ -147,28 +270,91 @@ void calibrateDeck(bool isTop, float knownWeight) {
     sendLogEvent("[CAL] Error: Known weight must be > 0.");
     return;
   }
-
-  if (isTop) {
-    sendLogEvent("[CAL TOP] Calibrating with " + String(knownWeight) + "g...");
-    if (!topScaleLeft.wait_ready_timeout(1000)) return;
-    long measuredDelta = topScaleLeft.read_average(30) - rawZeroTop;
-    if (measuredDelta == 0) { sendLogEvent("[CAL] Error: No weight detected."); return; }
-    
-    calFactorTopLeft = abs((float)measuredDelta / knownWeight);
-    topScaleLeft.set_scale(calFactorTopLeft);
-    saveSettings();
-    sendLogEvent("[CAL TOP] Success! New factor: " + String(calFactorTopLeft, 2));
-  } else {
-    sendLogEvent("[CAL BOT] Calibrating with " + String(knownWeight) + "g...");
-    if (!bottomScaleRight.wait_ready_timeout(1000)) return;
-    long measuredDelta = bottomScaleRight.read_average(30) - rawZeroBottom;
-    if (measuredDelta == 0) { sendLogEvent("[CAL] Error: No weight detected."); return; }
-    
-    calFactorBottomRight = abs((float)measuredDelta / knownWeight);
-    bottomScaleRight.set_scale(calFactorBottomRight);
-    saveSettings();
-    sendLogEvent("[CAL BOT] Success! New factor: " + String(calFactorBottomRight, 2));
+  if (calJob != CAL_NONE) {
+    sendLogEvent("[CAL] Busy. Wait for the current tare/calibration to finish.");
+    return;
   }
+
+  sendLogEvent(String("[CAL ") + (isTop ? "TOP" : "BOT") + "] Calibrating with " + String(knownWeight) + "g...");
+  calJob = CAL_FACTOR;
+  calIsTop = isTop;
+  calKnownWeight = knownWeight;
+  calSamples = 0;
+  calSum = 0;
+  calSettleUntil = millis() + CAL_SETTLE_MS;
+  calDeadline = millis() + CAL_TIMEOUT_MS;
+}
+
+// Called from finishCalibration() once CAL_SAMPLES readings are collected.
+void finishCalibration() {
+  long average = calSum / calSamples;
+  calSum = 0;
+  calSamples = 0;
+
+  if (calJob == CAL_TARE) {
+    if (calStage == 0) {
+      rawZeroTop = average;
+      topScaleLeft.set_offset(rawZeroTop);
+      filteredTopGrams = 0.0;
+      deltaTop = 0;
+      calStage = 1;
+      return;
+    }
+
+    rawZeroBottom = average;
+    bottomScaleRight.set_offset(rawZeroBottom);
+    filteredBottomGrams = 0.0;
+    deltaBottom = 0;
+    saveSettings();
+    calJob = CAL_NONE;
+    sendLogEvent("[TARE DONE] Decks zeroed to 0.0 g!");
+    return;
+  }
+
+  long measuredDelta = average - (calIsTop ? rawZeroTop : rawZeroBottom);
+  if (measuredDelta == 0) {
+    calJob = CAL_NONE;
+    sendLogEvent("[CAL] Error: No weight detected.");
+    return;
+  }
+
+  float factor = abs((float)measuredDelta / calKnownWeight);
+  if (calIsTop) {
+    calFactorTopLeft = factor;
+    topScaleLeft.set_scale(calFactorTopLeft);
+    filteredTopGrams = calKnownWeight;
+  } else {
+    calFactorBottomRight = factor;
+    bottomScaleRight.set_scale(calFactorBottomRight);
+    filteredBottomGrams = calKnownWeight;
+  }
+
+  saveSettings();
+  calJob = CAL_NONE;
+  sendLogEvent(String("[CAL ") + (calIsTop ? "TOP" : "BOT") + "] Success! New factor: " + String(factor, 2));
+}
+
+// Take at most one sample per loop so WebSocket telemetry keeps flowing.
+void serviceCalibration() {
+  if (calJob == CAL_NONE) return;
+
+  if ((long)(millis() - calDeadline) >= 0) {
+    calJob = CAL_NONE;
+    calSamples = 0;
+    calSum = 0;
+    sendLogEvent("[CAL] Error: Timeout waiting for load cell readings.");
+    return;
+  }
+
+  if ((long)(millis() - calSettleUntil) < 0) return;
+
+  bool useTop = (calJob == CAL_TARE) ? (calStage == 0) : calIsTop;
+  HX711 &scale = useTop ? topScaleLeft : bottomScaleRight;
+  if (!scale.is_ready()) return;
+
+  calSum += scale.read();
+  calSamples++;
+  if (calSamples >= CAL_SAMPLES) finishCalibration();
 }
 
 void handleCommand(char cmd) {
@@ -185,10 +371,8 @@ void handleCommand(char cmd) {
     digitalWrite(STATUS_LED_PIN, HIGH);
     sendLogEvent(forceFullSpeed ? "[MOTOR] Forced 100% PWM" : "[MOTOR] Potentiometer Control");
   } else if (cmd == 's' || cmd == 'S') {
-    systemOn = !systemOn;
-    if (!systemOn) forceFullSpeed = false;
-    digitalWrite(STATUS_LED_PIN, HIGH ? systemOn : LOW);
-    sendLogEvent(systemOn ? "[CMD] System ON" : "[CMD] System OFF");
+    if (systemOn) setSystemOff("[CMD] System OFF");
+    else setSystemOn("[CMD] System ON");
   }
 }
 
@@ -227,15 +411,13 @@ void handleWebSocketMessage(String payload) {
   cmd.toUpperCase();
 
   if (cmd == "START") {
-    systemOn = true;
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    sendLogEvent("[WEB] Batch Started");
+    batchTargetGrams = jsonField(payload, "input_weight").toFloat();
+    if (batchTargetGrams < 0) batchTargetGrams = 0;
+    setSystemOn("[WEB] Batch Started");
   }
   else if (cmd == "STOP") {
-    systemOn = false;
-    forceFullSpeed = false;
-    digitalWrite(STATUS_LED_PIN, LOW);
-    sendLogEvent("[WEB] Batch Stopped");
+    batchTargetGrams = 0;
+    setSystemOff("[WEB] Batch Stopped");
   }
   else if (cmd == "TARE") {
     tareBoth();
@@ -365,6 +547,8 @@ void setup() {
 
   loadSettings(); 
 
+  lastScaleReadyMs = millis();
+
   if (WifiSettings::connectStored()) {
     startNetworkServices();
   } else {
@@ -406,6 +590,9 @@ void loop() {
     handleCommand(Serial.read());
   }
 
+  // Non-blocking tare/calibration. Takes over the HX711 reads while active.
+  serviceCalibration();
+
   // 2. Button debounce: toggles system on/off
   int rawButtonReading = digitalRead(BUTTON_PIN);
   if (rawButtonReading != lastButtonState) {
@@ -416,11 +603,8 @@ void loop() {
     if (rawButtonReading != debouncedButtonState) {
       debouncedButtonState = rawButtonReading;
       if (debouncedButtonState == LOW) {
-        systemOn = !systemOn;
-        if (!systemOn) forceFullSpeed = false;
-
-        digitalWrite(STATUS_LED_PIN, systemOn ? HIGH : LOW);
-        sendLogEvent(systemOn ? "[BTN] System ON" : "[BTN] System OFF");
+        if (systemOn) setSystemOff("[BTN] System OFF");
+        else setSystemOn("[BTN] System ON");
       }
     }
   }
@@ -460,27 +644,36 @@ void loop() {
   else                        rampSpeed = motorSpeed;
   ledcWrite(PWM_CHANNEL, rampSpeed);
 
-  // 4. Sample and filter load cells
-  if (topScaleLeft.is_ready()) {
-    long rawLeft = topScaleLeft.read();
-    deltaTop = rawLeft - rawZeroTop;
-    float gramsTop = (float)deltaTop / calFactorTopLeft;
-    filteredTopGrams = (FILTER_ALPHA * gramsTop) + ((1.0 - FILTER_ALPHA) * filteredTopGrams);
+  // 4. Sample and filter load cells (the calibration job owns the reads while active)
+  if (calJob == CAL_NONE) {
+    if (topScaleLeft.is_ready()) {
+      long rawLeft = topScaleLeft.read();
+      deltaTop = rawLeft - rawZeroTop;
+      float gramsTop = (float)deltaTop / calFactorTopLeft;
+      filteredTopGrams = (FILTER_ALPHA * gramsTop) + ((1.0 - FILTER_ALPHA) * filteredTopGrams);
+    }
+
+    if (bottomScaleRight.is_ready()) {
+      long rawRight = bottomScaleRight.read();
+      deltaBottom = rawRight - rawZeroBottom;
+      float gramsBottom = (float)deltaBottom / calFactorBottomRight;
+      filteredBottomGrams = (FILTER_ALPHA * gramsBottom) + ((1.0 - FILTER_ALPHA) * filteredBottomGrams);
+    }
   }
 
-  if (bottomScaleRight.is_ready()) {
-    long rawRight = bottomScaleRight.read();
-    deltaBottom = rawRight - rawZeroBottom;
-    float gramsBottom = (float)deltaBottom / calFactorBottomRight;
-    filteredBottomGrams = (FILTER_ALPHA * gramsBottom) + ((1.0 - FILTER_ALPHA) * filteredBottomGrams);
-  }
+  checkLoadCellHealth();
 
   // 5. Telemetry every 300 ms
   if (millis() - lastPrintTime >= 300) {
     lastPrintTime = millis();
 
-    float displayTop = (abs(filteredTopGrams) < ZERO_DEADBAND) ? 0.0 : filteredTopGrams;
-    float displayBot = (abs(filteredBottomGrams) < ZERO_DEADBAND) ? 0.0 : filteredBottomGrams;
+    // Batch-relative readings: what each deck collected since START.
+    float displayTop = displayGrams(filteredTopGrams) - batchBaseTop;
+    float displayBot = displayGrams(filteredBottomGrams) - batchBaseBottom;
+    if (displayTop < 0) displayTop = 0;
+    if (displayBot < 0) displayBot = 0;
+
+    maybeAutoStop(displayTop + displayBot);
 
     String activeBin = "None";
     if (systemOn) {
@@ -499,10 +692,10 @@ void loop() {
       jsonTelemetry += "\"type\":\"telemetry\",";
       jsonTelemetry += "\"systemOn\":" + String(systemOn ? "true" : "false") + ",";
       jsonTelemetry += "\"status\":\"" + String(systemOn ? "Sorting" : "Idle") + "\",";
-      jsonTelemetry += "\"mode\":\"" + operatingMode + "\",";
-      jsonTelemetry += "\"wifi\":\"" + WiFi.SSID() + "\",";
+      jsonTelemetry += "\"mode\":\"" + jsonEscape(operatingMode) + "\",";
+      jsonTelemetry += "\"wifi\":\"" + jsonEscape(WiFi.SSID()) + "\",";
       jsonTelemetry += "\"vibration_speed\":" + String(speedPercent) + ",";
-      jsonTelemetry += "\"active_bin\":\"" + activeBin + "\",";
+      jsonTelemetry += "\"active_bin\":\"" + jsonEscape(activeBin) + "\",";
       jsonTelemetry += "\"top_grams\":" + String(displayTop, 1) + ",";
       jsonTelemetry += "\"bottom_grams\":" + String(displayBot, 1) + ",";
       jsonTelemetry += "\"total_grams\":" + String(displayTop + displayBot, 1);

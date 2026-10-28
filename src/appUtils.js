@@ -21,6 +21,33 @@ export function nextBatchId(batches) {
   return "B" + String(n).padStart(3, "0");
 }
 
+// Keep the higher of two batch ids. A database response can arrive after a
+// newer id has already been handed out, and reusing an id would make the
+// next save fail with a duplicate batch code.
+export function latestBatchId(current, candidate) {
+  const number = (id) => parseInt(String(id).replace(/\D/g, ""), 10) || 0;
+  return number(candidate) > number(current) ? candidate : current;
+}
+
+// A confirmed setup is bound to one batch. If the operator changes the bean,
+// target, or mode afterwards, the confirmation no longer describes the run
+// and the dashboard must send them back through the wizard.
+export function setupMatches(snapshot, machine) {
+  if (!snapshot || !machine) return false;
+  return (
+    snapshot.beanType === machine.beanType &&
+    Number(snapshot.inputTarget) === Number(machine.inputTarget) &&
+    snapshot.mode === machine.mode
+  );
+}
+
+// Stock is only known when the inventory call succeeded. "short" blocks the
+// setup step; "unknown" lets the operator continue with a warning.
+export function setupStockState({ stockKnown = true, onHand = 0, target = 0 } = {}) {
+  if (!stockKnown) return "unknown";
+  return Number(onHand) >= Number(target) ? "ok" : "short";
+}
+
 // Maps a row from get_batches.php into the shape the UI uses.
 // small_weight and fine_weight both fold into "debris", the bottom-deck fine stream.
 export function mapDbBatch(row) {

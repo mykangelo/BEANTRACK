@@ -86,9 +86,17 @@ int rampSpeed = 0;
 // --- System and operating state ---
 bool systemOn = false;
 bool forceFullSpeed = false;
-bool webSpeedOverride = false;        
 int  webTargetSpeedPercent = 40;
-String operatingMode = "Automatic";   
+String operatingMode = "Automatic";
+
+// Speed authority follows the operating mode:
+//   Manual    - the panel potentiometer is the only control
+//   Automatic - the dashboard commands the speed
+// The mode is fixed for the duration of a batch, so a run never changes
+// hands halfway through.
+bool manualSpeedControl() {
+  return operatingMode == "Manual";
+}
 
 unsigned long lastPrintTime = 0;
 
@@ -114,7 +122,6 @@ const unsigned long debounceDelay = 50;
 
 // --- Potentiometer filtering ---
 int smoothedPotValue = 0;
-int lastPotPercent = 0;
 const float POT_ALPHA = 0.2;
 
 String jsonEscape(String s) {
@@ -366,10 +373,14 @@ void handleCommand(char cmd) {
     calibrateDeck(false, 100.0);
   } else if (cmd == 'f' || cmd == 'F') {
     forceFullSpeed = !forceFullSpeed;
-    webSpeedOverride = false;
-    systemOn = true;
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    sendLogEvent(forceFullSpeed ? "[MOTOR] Forced 100% PWM" : "[MOTOR] Potentiometer Control");
+    if (!systemOn) {
+      setSystemOn("[MOTOR] Forced 100% PWM");
+    } else {
+      sendLogEvent(forceFullSpeed
+        ? "[MOTOR] Forced 100% PWM"
+        : String("[MOTOR] Speed back to the ") +
+          (manualSpeedControl() ? "panel potentiometer" : "dashboard"));
+    }
   } else if (cmd == 's' || cmd == 'S') {
     if (systemOn) setSystemOff("[CMD] System OFF");
     else setSystemOn("[CMD] System ON");
@@ -431,14 +442,23 @@ void handleWebSocketMessage(String payload) {
     calibrateDeck(false, weight);
   }
   else if (cmd == "SET_MODE") {
+    if (systemOn) {
+      sendLogEvent("[WEB] Mode cannot change while a batch is running.");
+      return;
+    }
     String mode = jsonField(payload, "mode");
     operatingMode = (mode == "Manual") ? "Manual" : "Automatic";
-    sendLogEvent("[WEB] Mode set to " + operatingMode);
+    sendLogEvent("[WEB] Mode set to " + operatingMode +
+                 " (speed is set by the " +
+                 (manualSpeedControl() ? "panel potentiometer" : "dashboard") + ")");
   }
   else if (cmd == "SET_SPEED") {
+    if (manualSpeedControl()) {
+      sendLogEvent("[WEB] Speed command ignored: in Manual mode the panel potentiometer sets the speed.");
+      return;
+    }
     int newSpeed = jsonField(payload, "value").toInt();
     webTargetSpeedPercent = constrain(newSpeed, 0, 100);
-    webSpeedOverride = true;
     forceFullSpeed = false;
     sendLogEvent("[WEB] Vibration speed set to " + String(webTargetSpeedPercent) + "%");
   }
@@ -615,11 +635,6 @@ void loop() {
   smoothedPotValue = (int)((POT_ALPHA * rawPot) + ((1.0 - POT_ALPHA) * smoothedPotValue));
   int currentPotPercent = map(smoothedPotValue, 0, 4095, 0, 100);
 
-  if (abs(currentPotPercent - lastPotPercent) > 3) {
-    webSpeedOverride = false;
-    lastPotPercent = currentPotPercent;
-  }
-
   int motorSpeed = 0;
   int speedPercent = 0;
 
@@ -627,12 +642,14 @@ void loop() {
     if (forceFullSpeed) {
       speedPercent = 100;
       motorSpeed = 255;
-    } else if (webSpeedOverride) {
-      speedPercent = webTargetSpeedPercent;
-      motorSpeed = map(speedPercent, 0, 100, 0, 255);
-    } else {
+    } else if (manualSpeedControl()) {
+      // Manual mode: the panel potentiometer is the only speed control.
       speedPercent = currentPotPercent;
       motorSpeed = map(smoothedPotValue, 0, 4095, 0, 255);
+    } else {
+      // Automatic mode: the dashboard commands the speed.
+      speedPercent = webTargetSpeedPercent;
+      motorSpeed = map(speedPercent, 0, 100, 0, 255);
     }
 
     if (motorSpeed > 0 && motorSpeed < 50 && !forceFullSpeed) {
@@ -675,6 +692,10 @@ void loop() {
 
     maybeAutoStop(displayTop + displayBot);
 
+    // The commanded speed and the speed actually applied to the motor differ
+    // while the soft-start ramp is still climbing.
+    int appliedPercent = map(rampSpeed, 0, 255, 0, 100);
+
     String activeBin = "None";
     if (systemOn) {
       if (displayTop > displayBot && displayTop > 0) activeBin = "Top Deck (Large)";
@@ -682,7 +703,7 @@ void loop() {
       else activeBin = "Sorting";
     }
 
-    String statusLine = String(systemOn ? "[ON " : "[OFF ") + String(speedPercent) + "%] " +
+    String statusLine = String(systemOn ? "[ON " : "[OFF ") + String(appliedPercent) + "%] " +
                         "TOP: " + String(displayTop, 1) + "g | " +
                         "BOT: " + String(displayBot, 1) + "g";
     Serial.println(statusLine);
@@ -695,6 +716,7 @@ void loop() {
       jsonTelemetry += "\"mode\":\"" + jsonEscape(operatingMode) + "\",";
       jsonTelemetry += "\"wifi\":\"" + jsonEscape(WiFi.SSID()) + "\",";
       jsonTelemetry += "\"vibration_speed\":" + String(speedPercent) + ",";
+      jsonTelemetry += "\"motor_speed\":" + String(appliedPercent) + ",";
       jsonTelemetry += "\"active_bin\":\"" + jsonEscape(activeBin) + "\",";
       jsonTelemetry += "\"top_grams\":" + String(displayTop, 1) + ",";
       jsonTelemetry += "\"bottom_grams\":" + String(displayBot, 1) + ",";

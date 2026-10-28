@@ -147,6 +147,44 @@ example `ws://192.168.1.50:81`, and restart Vite.
 Build a static bundle with `npm run build`, lint with `npm run lint`, and run
 the helper tests with `npm test`.
 
+### Dashboard flow
+
+The Dashboard has two states: the live view and a batch setup wizard. The
+wizard opens only when the operator presses **New batch** (or **Change setup**
+for a confirmed batch); it never opens by itself, so reloading the page during
+a run lands on the live view.
+
+1. **Connect** — checks whether the ESP32 is reachable. Wi-Fi setup is optional
+   and only needed when the board cannot join its saved network. The operator
+   can continue offline to run a simulated batch.
+2. **Batch setup** — target batch size, operating mode, bean type, and the
+   starting vibration speed in Automatic mode. The panel shows how many grams
+   of the selected bean are on hand; a known shortfall blocks the next step.
+   The last setup is remembered between sessions.
+3. **Review** — a read-only summary of the batch, plus Tare and Calibrate for
+   the scale. Confirming binds the setup to one batch and opens the live
+   dashboard with the motor controls. Changing the bean, target, or mode later
+   requires going through the wizard again.
+
+The live dashboard keeps the run controls in a sticky bar at the bottom:
+**Start sorting**, **Stop sorting**, **Tare load cells**, **Calibrate**, and
+**Reset batch**. Tare and Calibrate are available whenever the motor is not
+running. Reset asks for a second click and clears the run on screen. A
+confirmation is consumed when the run ends, so the next batch starts with
+**New batch**.
+
+The operating mode decides who owns the vibration speed. In **Automatic** the
+dashboard dial sets it, and it can be changed while a batch runs. In **Manual**
+the panel potentiometer is the only control; the dashboard dial is visible but
+locked and simply mirrors what the board reports. The firmware enforces this —
+it ignores `SET_SPEED` in Manual mode — so the two never disagree.
+
+A note on wording: the number labelled **Target batch size** is the target the
+sort stops at, not a measurement of what entered the hopper. The dashboard
+reports **Not recovered** (target minus the large and medium decks) rather than
+calling it a loss, because the difference includes beans that were never
+weighed.
+
 ## 3. MySQL / XAMPP troubleshooting (Linux)
 
 Check what is actually running:

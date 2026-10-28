@@ -16,6 +16,16 @@ export const mono = { fontFamily: "'Plus Jakarta Sans', 'Inter', 'Segoe UI', san
 
 export const display = { fontFamily: "'Fraunces', 'Playfair Display', Georgia, 'Times New Roman', serif" };
 
+// The single small-caps level used for section, metric, and control labels.
+export const LABEL = {
+  ...sans,
+  color: C.textFaint,
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+};
+
 export const STATUS_COLOR = {
   Idle: C.textFaint,
   Processing: C.amber,

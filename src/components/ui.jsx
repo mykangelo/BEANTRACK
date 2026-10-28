@@ -4,7 +4,37 @@ import { C, blur, mono, sans, display } from "../appTokens";
 /* ---------------------------------------------------------------
    PANEL — frosted-glass card with optional title row
 --------------------------------------------------------------- */
-export function Panel({ title, right, children, style, bodyStyle }) {
+/* ---------------------------------------------------------------
+   DIVIDER — thick warm rule shared by every panel section
+--------------------------------------------------------------- */
+export function Divider({ style }) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{ height: 4, borderRadius: 999, background: "rgba(139,107,61,0.35)", ...style }}
+    />
+  );
+}
+
+/* ---------------------------------------------------------------
+   PANEL — frosted-glass card with optional title row
+--------------------------------------------------------------- */
+const BANNER_ROW = {
+  padding: "14px 20px",
+  background: "linear-gradient(180deg, rgba(201,154,46,0.32) 0%, rgba(201,154,46,0.16) 100%)",
+  borderBottom: `1px solid ${C.glassLine}`,
+};
+
+const BANNER_TEXT = {
+  fontSize: 20,
+  fontWeight: 800,
+  color: C.text,
+  letterSpacing: "0.14em",
+  textTransform: "uppercase",
+};
+
+export function Panel({ title, right, children, style, bodyStyle, titleStyle, titleRowStyle, centerTitle, titleVariant }) {
+  const banner = titleVariant === "banner";
   return (
     <div
       style={{
@@ -18,8 +48,21 @@ export function Panel({ title, right, children, style, bodyStyle }) {
       }}
     >
       {title && (
-        <div className="flex items-center justify-between px-5 pt-4">
-          <span style={{ ...sans, color: C.textDim, fontSize: 12.5, fontWeight: 600, letterSpacing: "0.01em" }}>
+        <div
+          className={`flex items-center px-5 pt-4 ${centerTitle || banner ? "justify-center" : "justify-between"}`}
+          style={{ ...(banner ? BANNER_ROW : null), ...titleRowStyle }}
+        >
+          <span
+            style={{
+              ...sans,
+              color: C.textDim,
+              fontSize: 12.5,
+              fontWeight: 600,
+              letterSpacing: "0.01em",
+              ...(banner ? BANNER_TEXT : null),
+              ...titleStyle,
+            }}
+          >
             {title}
           </span>
           {right}
@@ -103,7 +146,7 @@ export function Metric({ label, value, unit, color }) {
    variant "action": cream at rest, gold on hover, brown while pressed
    variant "reset":  gold at rest, flashes dark briefly on click
 --------------------------------------------------------------- */
-export function Button({ children, onClick, disabled, variant = "action", icon: Icon }) {
+export function Button({ children, onClick, disabled, variant = "action", icon: Icon, style }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [flash, setFlash] = useState(false);
@@ -113,7 +156,11 @@ export function Button({ children, onClick, disabled, variant = "action", icon: 
   useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   let bg, fg, border;
-  if (variant === "reset") {
+  if (variant === "stop") {
+    if (pressed) { bg = "#8E3B25"; fg = "#FFF6E6"; border = "#8E3B25"; }
+    else if (hover) { bg = "#B4553F"; fg = "#FFF6E6"; border = "#B4553F"; }
+    else { bg = "rgba(180,85,63,0.14)"; fg = "#8E3B25"; border = "#B4553F"; }
+  } else if (variant === "reset") {
     if (flash) { bg = C.text; fg = C.panel; border = C.text; }
     else { bg = C.goldGradient; fg = C.text; border = C.amber; }
   } else if (pressed) {
@@ -134,6 +181,8 @@ export function Button({ children, onClick, disabled, variant = "action", icon: 
     if (onClick) onClick(e);
   }
 
+  const isStop = variant === "stop";
+
   return (
     <button
       type="button"
@@ -145,18 +194,19 @@ export function Button({ children, onClick, disabled, variant = "action", icon: 
       disabled={disabled}
       className="flex items-center justify-center gap-2 px-5 py-2.5"
       style={{
-        background: disabled ? "rgba(255,251,240,0.35)" : bg,
-        color: disabled ? C.textFaint : fg,
-        border: `1px solid ${disabled ? C.glassLine : border}`,
+        background: disabled ? (isStop ? "rgba(180,85,63,0.07)" : "rgba(255,251,240,0.35)") : bg,
+        color: disabled ? (isStop ? "rgba(142,59,37,0.5)" : C.textFaint) : fg,
+        border: `1px solid ${disabled ? (isStop ? "rgba(180,85,63,0.35)" : C.glassLine) : border}`,
         borderRadius: 999,
         cursor: disabled ? "not-allowed" : "pointer",
         boxShadow: disabled || pressed ? "none" : "0 4px 14px -6px rgba(90,58,24,0.35)",
         transform: hover && !disabled && !pressed ? "translateY(-1px)" : "none",
         transition: "transform .15s ease, box-shadow .15s ease, background .15s ease",
-        ...mono,
+        ...sans,
         fontSize: 12.5,
         fontWeight: 700,
         letterSpacing: "0.02em",
+        ...style,
       }}
     >
       {Icon && <Icon size={14} />}

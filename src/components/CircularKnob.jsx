@@ -47,6 +47,7 @@ export default function CircularKnob({
   label = "Speed",
   suffix = "%",
   showValue = true,
+  showLabel = true,
 }) {
   const svgRef = useRef(null);
   const [dragging, setDragging] = useState(false);
@@ -245,18 +246,20 @@ export default function CircularKnob({
         )}
       </svg>
 
-      <div
-        style={{
-          marginTop: 6,
-          fontSize: 10.5,
-          fontWeight: 600,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
-          color: C.textFaint,
-        }}
-      >
-        {label}
-      </div>
+      {showLabel && (
+        <div
+          style={{
+            marginTop: 6,
+            fontSize: 10.5,
+            fontWeight: 600,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            color: C.textFaint,
+          }}
+        >
+          {label}
+        </div>
+      )}
     </div>
   );
 }

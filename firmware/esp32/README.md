@@ -63,6 +63,14 @@ over.
   `src/appConstants.js`; keep them in sync.
 - If neither HX711 reports a reading for 5 s during a run, the firmware stops
   the motor and sends `[FAULT] loadcell...` to the dashboard.
+- **The operating mode decides who owns the vibration speed.** In `Manual` the
+  panel potentiometer is the only control and the firmware ignores `SET_SPEED`;
+  in `Automatic` the dashboard commands the speed and the potentiometer is
+  ignored. `SET_MODE` is refused while a batch is running, so a run never
+  changes hands halfway through.
+- Telemetry reports both speeds: `vibration_speed` is the commanded value and
+  `motor_speed` is what the motor is actually running at. They differ while the
+  soft-start ramp is still climbing.
 
 Do not commit real Wi-Fi passwords, OTA passwords, or generated `.pio` build
 output.

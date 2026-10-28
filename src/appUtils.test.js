@@ -4,9 +4,12 @@ import assert from "node:assert/strict";
 import {
   clamp,
   fmtTime,
+  latestBatchId,
   mapDbBatch,
   nextBatchId,
   normalizeBins,
+  setupMatches,
+  setupStockState,
   sortingLoss,
 } from "./appUtils.js";
 
@@ -34,6 +37,30 @@ test("nextBatchId increments the highest numeric id", () => {
 test("nextBatchId pads to three digits and grows past 999", () => {
   assert.equal(nextBatchId([{ id: "B099" }]), "B100");
   assert.equal(nextBatchId([{ id: "B999" }]), "B1000");
+});
+
+test("latestBatchId keeps the highest id so a stale response cannot reuse one", () => {
+  assert.equal(latestBatchId("B006", "B005"), "B006");
+  assert.equal(latestBatchId("B005", "B006"), "B006");
+  assert.equal(latestBatchId("B005", "B005"), "B005");
+  assert.equal(latestBatchId("B999", "B1000"), "B1000");
+  assert.equal(latestBatchId("B005", "not-a-batch"), "B005");
+});
+
+test("setupMatches binds a confirmation to the bean, target, and mode", () => {
+  const machine = { beanType: "Arabica", inputTarget: 800, mode: "Automatic" };
+  assert.equal(setupMatches({ beanType: "Arabica", inputTarget: 800, mode: "Automatic" }, machine), true);
+  assert.equal(setupMatches({ beanType: "Robusta", inputTarget: 800, mode: "Automatic" }, machine), false);
+  assert.equal(setupMatches({ beanType: "Arabica", inputTarget: 900, mode: "Automatic" }, machine), false);
+  assert.equal(setupMatches({ beanType: "Arabica", inputTarget: 800, mode: "Manual" }, machine), false);
+  assert.equal(setupMatches(null, machine), false);
+});
+
+test("setupStockState separates unknown stock from a real shortfall", () => {
+  assert.equal(setupStockState({ stockKnown: true, onHand: 900, target: 800 }), "ok");
+  assert.equal(setupStockState({ stockKnown: true, onHand: 700, target: 800 }), "short");
+  assert.equal(setupStockState({ stockKnown: false, onHand: 0, target: 800 }), "unknown");
+  assert.equal(setupStockState(), "ok");
 });
 
 test("mapDbBatch converts database strings and folds both fine streams into debris", () => {

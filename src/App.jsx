@@ -22,7 +22,7 @@ import {
   WEIGHT_CHANGE_G,
   WEIGHT_FLOW_G,
 } from "./appConstants";
-import { clamp, nextBatchId, mapDbBatch, normalizeBins, getJson, postJson } from "./appUtils";
+import { clamp, latestBatchId, nextBatchId, mapDbBatch, normalizeBins, setupMatches, getJson, postJson } from "./appUtils";
 
 const SHELL_BACKGROUND =
   "radial-gradient(1000px 700px at 90% -15%, rgba(244,214,150,0.55), transparent 70%), " +
@@ -37,6 +37,42 @@ const CALIBRATE_TIMEOUT_MS = 20000;
 const WS_STALE_MS = 2500;
 const WS_CONNECT_TIMEOUT_MS = 5000;
 const WS_WATCH_MS = 1000;
+// How long an explicit mode/speed choice is held while waiting for the board
+// to report it back. If it never does, the control rolls back to the board.
+const SETTINGS_CONFIRM_MS = 2500;
+// A drag of the speed dial emits one value per pixel; send at most this often.
+const SPEED_SEND_INTERVAL_MS = 100;
+
+// The last setup the operator used is remembered so a new session starts from
+// the same bean, mode, and target instead of the defaults.
+const SETUP_STORE_KEY = "beantrack.setup.v1";
+
+function loadStoredSetup() {
+  try {
+    const raw = localStorage.getItem(SETUP_STORE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSetup(setup) {
+  try {
+    localStorage.setItem(
+      SETUP_STORE_KEY,
+      JSON.stringify({
+        beanType: setup.beanType,
+        mode: setup.mode,
+        inputTarget: setup.inputTarget,
+      })
+    );
+  } catch {
+    // Storage may be unavailable (private mode, blocked cookies). The setup
+    // then simply is not remembered between sessions.
+  }
+}
 
 const EMPTY_INVENTORY = {
   stock: { Arabica: 0, Robusta: 0 },
@@ -71,17 +107,36 @@ export default function CoffeeSorterApp() {
   const [live, setLive] = useState(EMPTY_LIVE);
   const [taring, setTaring] = useState(false);
   const [tareDoneAt, setTareDoneAt] = useState(null);
-  const [machine, setMachine] = useState({
-    status: "Idle",
-    batchId: nextBatchId(SEED_BATCHES),
-    beanType: "Arabica",
-    mode: "Automatic",
-    vibrationSpeed: RECOMMENDED_SPEED,
-    processingTime: 0,
-    liveWeight: 0,
-    inputTarget: 1000,
-    sortingCategory: "—",
+  // The setup wizard is opened explicitly with New batch or Change setup. It
+  // is never shown on load, so a reload during a run lands on the live view.
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupStep, setSetupStep] = useState(1);
+  const [confirmedSetup, setConfirmedSetup] = useState(null);
+  // Load the remembered setup once. The machine state and the first device
+  // sync both start from this exact object.
+  const [storedSetup] = useState(loadStoredSetup);
+  const [machine, setMachine] = useState(() => {
+    const stored = storedSetup ?? {};
+    return {
+      status: "Idle",
+      batchId: nextBatchId(SEED_BATCHES),
+      beanType: stored.beanType === "Robusta" ? "Robusta" : "Arabica",
+      mode: stored.mode === "Manual" ? "Manual" : "Automatic",
+      vibrationSpeed: RECOMMENDED_SPEED,
+      processingTime: 0,
+      liveWeight: 0,
+      inputTarget: Number.isFinite(Number(stored.inputTarget))
+        ? clamp(Number(stored.inputTarget), 200, 2000)
+        : 1000,
+      sortingCategory: "—",
+      motorSpeed: 0,
+    };
   });
+
+  // A confirmation is bound to the exact bean, target, and mode the operator
+  // reviewed. Any later change invalidates it until the wizard is confirmed
+  // again. Speed is deliberately excluded: it can be adjusted mid-run.
+  const setupConfirmed = setupMatches(confirmedSetup, machine);
 
   const wsRef = useRef(null);
   const tickRef = useRef(null);
@@ -100,6 +155,42 @@ export default function CoffeeSorterApp() {
   const prevSystemOnRef = useRef(false);
   const stopReasonRef = useRef(null);
   const sourceRef = useRef("hardware");
+  // Batch ids handed out or seen this session. A finished run must not let the
+  // next run reuse its code, even before the database response refreshes the
+  // history list.
+  const usedBatchIdsRef = useRef(new Set());
+  const batchIdRef = useRef(machine.batchId);
+  batchIdRef.current = machine.batchId;
+  // The mode the operator explicitly chose, or one restored from the last
+  // session. Null means the board is the only source of truth for it.
+  const desiredModeRef = useRef(
+    storedSetup?.mode === "Manual" || storedSetup?.mode === "Automatic" ? storedSetup.mode : null
+  );
+  // Same idea for the vibration speed. The speed is not restored across
+  // sessions; it belongs to the board.
+  const desiredSpeedRef = useRef(null);
+  // The last values the board actually reported. They are used to roll back an
+  // optimistic mode/speed if the board never confirms the command.
+  const boardSettingsRef = useRef({ mode: machine.mode, speed: machine.vibrationSpeed });
+  const modeTimeoutRef = useRef(null);
+  const speedTimeoutRef = useRef(null);
+  // Outgoing speed commands are throttled so dragging the dial does not flood
+  // the ESP32 with one WebSocket frame per pixel.
+  const speedSendRef = useRef({ lastSent: 0, pending: null, timer: null });
+  // Only an explicit operator change is written to localStorage. Writing the
+  // defaults on mount would make the next session force a mode the operator
+  // never chose.
+  const setupDirtyRef = useRef(false);
+
+  // The next unused code, taking both database rows and codes already handed
+  // out this session into account.
+  function nextAvailableBatchId(currentId) {
+    const reserved = [
+      ...batches,
+      ...[...usedBatchIdsRef.current].map((id) => ({ id })),
+    ];
+    return latestBatchId(currentId, nextBatchId(reserved));
+  }
 
   function loadFromDb() {
     getJson("get_batches.php")
@@ -107,7 +198,17 @@ export default function CoffeeSorterApp() {
         if (!Array.isArray(rows)) throw new Error("bad response");
         const mapped = rows.map(mapDbBatch);
         setBatches(mapped);
-        setMachine((m) => ({ ...m, batchId: nextBatchId(mapped) }));
+        setMachine((m) => {
+          // Never renumber a batch that is currently being recorded.
+          if (runActiveRef.current || m.status === "Processing") return m;
+          return {
+            ...m,
+            batchId: nextBatchId([
+              ...mapped,
+              ...[...usedBatchIdsRef.current].map((id) => ({ id })),
+            ]),
+          };
+        });
         setDbDown(false);
       })
       .catch(() => setDbDown(true));
@@ -200,6 +301,75 @@ export default function CoffeeSorterApp() {
     return true;
   }
 
+  // Hold an explicit mode until the board confirms it. If it never does (the
+  // board refused the command, or the socket went away), roll back to the last
+  // value the board actually reported.
+  function armModeTimeout(mode) {
+    desiredModeRef.current = mode;
+    clearTimeout(modeTimeoutRef.current);
+    modeTimeoutRef.current = setTimeout(() => {
+      if (desiredModeRef.current !== mode) return;
+      desiredModeRef.current = null;
+      setMachine((m) => ({ ...m, mode: boardSettingsRef.current.mode }));
+    }, SETTINGS_CONFIRM_MS);
+  }
+
+  function armSpeedTimeout(value) {
+    clearTimeout(speedTimeoutRef.current);
+    speedTimeoutRef.current = setTimeout(() => {
+      if (desiredSpeedRef.current !== value) return;
+      desiredSpeedRef.current = null;
+      setMachine((m) => ({ ...m, vibrationSpeed: boardSettingsRef.current.speed }));
+    }, SETTINGS_CONFIRM_MS);
+  }
+
+  // Send at most one speed command per interval; the latest value always wins.
+  function sendSpeedThrottled(value) {
+    const state = speedSendRef.current;
+    const now = Date.now();
+    const elapsed = now - state.lastSent;
+    state.pending = value;
+
+    const send = (v) => {
+      speedSendRef.current.lastSent = Date.now();
+      sendHardwareCommand({ command: "SET_SPEED", value: v });
+    };
+
+    if (elapsed >= SPEED_SEND_INTERVAL_MS) {
+      clearTimeout(state.timer);
+      state.timer = null;
+      state.pending = null;
+      send(value);
+      return;
+    }
+
+    if (!state.timer) {
+      state.timer = setTimeout(() => {
+        const latest = speedSendRef.current.pending;
+        speedSendRef.current.timer = null;
+        speedSendRef.current.pending = null;
+        if (latest !== null) send(latest);
+      }, SPEED_SEND_INTERVAL_MS - elapsed);
+    }
+  }
+
+  // Push the operator's choices to the board after a reconnect. Only an
+  // explicit choice is sent: with nothing explicit, the board keeps the mode
+  // and speed it is already running and the dashboard adopts them from
+  // telemetry.
+  function syncDeviceSettings() {
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (desiredModeRef.current) {
+      socket.send(JSON.stringify({ command: "SET_MODE", mode: desiredModeRef.current }));
+      armModeTimeout(desiredModeRef.current);
+    }
+    if (desiredSpeedRef.current !== null) {
+      socket.send(JSON.stringify({ command: "SET_SPEED", value: desiredSpeedRef.current }));
+      armSpeedTimeout(desiredSpeedRef.current);
+    }
+  }
+
   function applyTelemetry(message) {
     if (typeof message.wifi === "string") setNetwork(message.wifi);
 
@@ -212,9 +382,33 @@ export default function CoffeeSorterApp() {
       runStartedAtRef.current = Date.now();
       stopReasonRef.current = null;
       sourceRef.current = "hardware";
+      usedBatchIdsRef.current.add(batchIdRef.current);
       resetWeightWatch();
+      // A run started from the physical panel button takes priority over the
+      // wizard; show the live dashboard so the operator can stop it.
+      setSetupOpen(false);
+      setSetupStep(1);
     }
     prevSystemOnRef.current = deviceOn;
+
+    // The board is authoritative for the mode, but a SET_MODE round trip takes
+    // up to one telemetry frame. Hold the operator's choice until the board
+    // confirms it, so the control does not snap back while it is in flight.
+    const incomingMode = message.mode === "Manual" ? "Manual" : "Automatic";
+    const desiredMode = desiredModeRef.current;
+    boardSettingsRef.current.mode = incomingMode;
+    if (desiredMode && incomingMode === desiredMode) {
+      desiredModeRef.current = null;
+      clearTimeout(modeTimeoutRef.current);
+    }
+
+    const incomingSpeed = clamp(Number(message.vibration_speed) || 0, 0, 100);
+    const desiredSpeed = desiredSpeedRef.current;
+    boardSettingsRef.current.speed = incomingSpeed;
+    if (desiredSpeed !== null && incomingSpeed === desiredSpeed) {
+      desiredSpeedRef.current = null;
+      clearTimeout(speedTimeoutRef.current);
+    }
 
     const top = Math.max(0, Number(message.top_grams) || 0);
     const bottom = Math.max(0, Number(message.bottom_grams) || 0);
@@ -228,8 +422,9 @@ export default function CoffeeSorterApp() {
       return {
         ...m,
         status,
-        mode: message.mode === "Manual" ? "Manual" : "Automatic",
-        vibrationSpeed: clamp(Number(message.vibration_speed) || 0, 0, 100),
+        mode: desiredMode || incomingMode,
+        vibrationSpeed: desiredSpeed ?? incomingSpeed,
+        motorSpeed: clamp(Number(message.motor_speed) || 0, 0, 100),
         sortingCategory: message.active_bin && message.active_bin !== "None" ? message.active_bin : "—",
         liveWeight: top + bottom,
         processingTime:
@@ -308,18 +503,28 @@ export default function CoffeeSorterApp() {
   }
 
   function markHardwareOffline(wasLive) {
+    const runWasActive = runActiveRef.current;
     setHardwareConnected(false);
     setConnected(false);
     setReconnecting(false);
     // Allow the recorder to re-arm if the board is still running when it
     // reconnects. Batches that finish while offline cannot be saved.
     prevSystemOnRef.current = false;
+    // Commands that were waiting for confirmation cannot be confirmed now.
+    // The desired values stay in place so a reconnect can re-send them.
+    clearTimeout(modeTimeoutRef.current);
+    clearTimeout(speedTimeoutRef.current);
+    clearTimeout(speedSendRef.current.timer);
+    speedSendRef.current.timer = null;
+    speedSendRef.current.pending = null;
     if (!wasLive) return;
     setTaring(false);
     clearTimeout(tareTimerRef.current);
     runActiveRef.current = false;
     runStartedAtRef.current = null;
     stopReasonRef.current = null;
+    // A run ended by a disconnect still consumes its confirmed setup.
+    if (runWasActive) setConfirmedSetup(null);
     setMachine((m) => (m.status === "Processing" ? { ...m, status: "Error", sortingCategory: "—" } : m));
   }
 
@@ -342,6 +547,7 @@ export default function CoffeeSorterApp() {
       setHardwareConnected(true);
       setConnected(true);
       setReconnecting(false);
+      syncDeviceSettings();
     };
 
     socket.onmessage = (event) => {
@@ -369,6 +575,9 @@ export default function CoffeeSorterApp() {
   connectHardwareRef.current = connectHardware;
 
   useEffect(() => {
+    // The throttle object is created once, so its timer can be cleared from
+    // the cleanup below without reading a possibly-changed ref.
+    const speedSend = speedSendRef.current;
     loadFromDb();
     connectHardwareRef.current();
 
@@ -398,9 +607,24 @@ export default function CoffeeSorterApp() {
       wsRef.current?.close();
       wsRef.current = null;
       clearTimeout(tareTimerRef.current);
+      clearTimeout(modeTimeoutRef.current);
+      clearTimeout(speedTimeoutRef.current);
+      clearTimeout(speedSend.timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist the setup only after the operator changes something. This write
+  // runs after the state commits, so it always stores the merged values.
+  useEffect(() => {
+    if (!setupDirtyRef.current) return;
+    setupDirtyRef.current = false;
+    saveSetup({
+      beanType: machine.beanType,
+      mode: machine.mode,
+      inputTarget: machine.inputTarget,
+    });
+  }, [machine.beanType, machine.mode, machine.inputTarget]);
 
   useEffect(() => {
     if (machine.status !== "Processing" || hardwareConnected) return;
@@ -484,6 +708,11 @@ export default function CoffeeSorterApp() {
     if (!runActiveRef.current || !["Completed", "Idle"].includes(machine.status)) return;
     runActiveRef.current = false;
     runStartedAtRef.current = null;
+    // Make sure a finished code can never be handed out again, even if the
+    // run was started outside handleStart (for example from the panel button).
+    usedBatchIdsRef.current.add(machine.batchId);
+    // A confirmation covers one batch only. The next Start needs a new setup.
+    setConfirmedSetup(null);
 
     const weights = normalizeBins(live, machine.inputTarget);
     const source = sourceRef.current;
@@ -519,12 +748,16 @@ export default function CoffeeSorterApp() {
   }, [machine.status]);
 
   function resetRun() {
+    const runWasActive = runActiveRef.current;
     runActiveRef.current = false;
     runStartedAtRef.current = null;
     stopReasonRef.current = null;
     resetWeightWatch();
     sendHardwareCommand({ command: "STOP" });
     setLive(EMPTY_LIVE);
+    // Discarding an active run consumes the confirmation. A reconnect while
+    // idle leaves a confirmed setup untouched.
+    if (runWasActive) setConfirmedSetup(null);
     setMachine((m) => ({ ...m, status: "Idle", processingTime: 0, liveWeight: 0, sortingCategory: "—" }));
   }
 
@@ -538,8 +771,32 @@ export default function CoffeeSorterApp() {
     if (!fault && connected) resetRun();
   }
 
+  function openSetup(step = 1) {
+    if (machine.status === "Processing" || runActiveRef.current) return;
+    setSetupStep(step);
+    setSetupOpen(true);
+  }
+
+  function closeSetup() {
+    setSetupOpen(false);
+    setSetupStep(1);
+  }
+
+  function confirmSetup() {
+    if (fault || taring || runActiveRef.current) return;
+    const onHand = inventory.stock?.[machine.beanType] ?? 0;
+    if (!dbDown && onHand < machine.inputTarget) return;
+    setConfirmedSetup({
+      beanType: machine.beanType,
+      inputTarget: machine.inputTarget,
+      mode: machine.mode,
+    });
+    setSetupOpen(false);
+    setSetupStep(1);
+  }
+
   function handleStart() {
-    if (machine.status === "Processing" || fault) return;
+    if (machine.status === "Processing" || fault || taring || !setupConfirmed || runActiveRef.current) return;
 
     const onHand = inventory.stock?.[machine.beanType] ?? 0;
     if (!dbDown && onHand < machine.inputTarget) {
@@ -551,6 +808,13 @@ export default function CoffeeSorterApp() {
     }
     setNotice(null);
 
+    // A finished run keeps its code on screen until the next run starts. Claim
+    // a fresh one here so restarting can never collide with the saved batch,
+    // even if the database refresh has not arrived yet.
+    const batchId = nextAvailableBatchId(machine.batchId);
+    usedBatchIdsRef.current.add(batchId);
+    batchIdRef.current = batchId;
+
     runActiveRef.current = true;
     runStartedAtRef.current = Date.now();
     stopReasonRef.current = null;
@@ -558,10 +822,17 @@ export default function CoffeeSorterApp() {
     resetWeightWatch();
     sendHardwareCommand({ command: "START", input_weight: machine.inputTarget });
     setLive(EMPTY_LIVE);
-    setMachine((m) => ({ ...m, status: "Processing", processingTime: 0, liveWeight: 0 }));
+    setMachine((m) => ({
+      ...m,
+      batchId,
+      status: "Processing",
+      processingTime: 0,
+      liveWeight: 0,
+    }));
   }
 
   function handleReset() {
+    if (machine.status === "Processing") return;
     clearInterval(tickRef.current);
     sendHardwareCommand({ command: "STOP" });
     runActiveRef.current = false;
@@ -569,35 +840,66 @@ export default function CoffeeSorterApp() {
     stopReasonRef.current = null;
     resetWeightWatch();
     setFault(null);
+    setConfirmedSetup(null);
     setLive(EMPTY_LIVE);
     setMachine((m) => ({
       ...m,
       status: "Idle",
       processingTime: 0,
       liveWeight: 0,
-      batchId: nextBatchId(batches),
+      batchId: nextAvailableBatchId(m.batchId),
       sortingCategory: "—",
     }));
   }
 
   function setBeanType(beanType) {
-    if (machine.status === "Processing") return;
+    if (machine.status === "Processing" || beanType === machine.beanType) return;
+    setupDirtyRef.current = true;
     setMachine((m) => ({ ...m, beanType }));
   }
 
   function setMode(mode) {
     if (machine.status === "Processing") return;
-    sendHardwareCommand({ command: "SET_MODE", mode });
-    setMachine((m) => ({ ...m, mode }));
+    // Handing speed back to the panel drops any speed the dashboard still
+    // claims, so the knob mirrors the board again straight away.
+    if (mode === "Manual") {
+      desiredSpeedRef.current = null;
+      clearTimeout(speedTimeoutRef.current);
+    }
+    if (mode !== machine.mode) {
+      setupDirtyRef.current = true;
+      setMachine((m) => ({ ...m, mode }));
+    }
+    // Hold this choice until the board confirms it. Offline, keep it so a
+    // reconnect can apply it.
+    if (sendHardwareCommand({ command: "SET_MODE", mode })) armModeTimeout(mode);
+    else desiredModeRef.current = mode;
   }
 
   function setSpeed(value) {
-    sendHardwareCommand({ command: "SET_SPEED", value });
+    // In Manual mode the panel potentiometer owns the speed; the dashboard
+    // only mirrors what the board reports.
+    if (machine.mode === "Manual") return;
     setMachine((m) => ({ ...m, vibrationSpeed: value }));
+
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      // Offline simulation: remember the speed for the next connection, but
+      // do not schedule a rollback because there is nothing to confirm it.
+      desiredSpeedRef.current = value;
+      clearTimeout(speedTimeoutRef.current);
+      return;
+    }
+
+    // Hold this choice until the board confirms it, so a telemetry frame that
+    // still carries the old speed does not undo the operator's turn.
+    desiredSpeedRef.current = value;
+    armSpeedTimeout(value);
+    sendSpeedThrottled(value);
   }
 
   function setInputTarget(value) {
-    if (machine.status === "Processing") return;
+    if (machine.status === "Processing" || value === machine.inputTarget) return;
+    setupDirtyRef.current = true;
     setMachine((m) => ({ ...m, inputTarget: value }));
   }
 
@@ -619,6 +921,8 @@ export default function CoffeeSorterApp() {
         onCalibrate={handleCalibrate}
         currentNetwork={network}
         connected={connected}
+        stock={inventory.stock}
+        stockKnown={!dbDown}
         fault={fault}
         taring={taring}
         tareDoneAt={tareDoneAt}
@@ -627,6 +931,14 @@ export default function CoffeeSorterApp() {
         onResetWifi={resetWifi}
         calibNotice={calibNotice}         
         setCalibNotice={setCalibNotice}   
+        setupOpen={setupOpen}
+        setupStep={setupStep}
+        onSetupStep={setSetupStep}
+        onOpenSetup={openSetup}
+        onCloseSetup={closeSetup}
+        onConfirmSetup={confirmSetup}
+        setupConfirmed={setupConfirmed}
+        onOpenInventory={() => setView("inventory")}
       />
     ),
     monitor: <SortingWeightMonitor machine={machine} live={live} />,
